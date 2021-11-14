@@ -43,6 +43,17 @@ pub enum TraceLine {
         component: ComponentIndex,
         list: ListIndex,
     },
+    JoinClaim {
+        component: ComponentIndex,
+        count: BigUint,
+        assm: Vec<Lit>,
+    },
+    ExtensionClaim {
+        list: ListIndex,
+        subcomponent: ComponentIndex,
+        count: BigUint,
+        assm: Vec<Lit>,
+    },
 }
 
 #[derive(Error, Debug)]
@@ -121,6 +132,14 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
+            "a" => match data {
+                [list, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
+                    list: LineParser::parsenum(list)?,
+                    count: LineParser::parsenum(count)?,
+                    assm: LineParser::parsevec(a)?,
+                }),
+                _ => Err(ParseError::MalformedLine()),
+            },
             "jl" => match data {
                 [list, comp, "0"] => Ok(TraceLine::JoinList {
                     component: LineParser::parsenum(comp)?,
@@ -128,9 +147,18 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "a" => match data {
-                [list, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
+            "j" => match data {
+                [comp, count, a @ .., "0"] => Ok(TraceLine::JoinClaim {
+                    component: LineParser::parsenum(comp)?,
+                    count: LineParser::parsenum(count)?,
+                    assm: LineParser::parsevec(a)?,
+                }),
+                _ => Err(ParseError::MalformedLine()),
+            },
+            "e" => match data {
+                [list, subcomp, count, a @ .., "0"] => Ok(TraceLine::ExtensionClaim {
                     list: LineParser::parsenum(list)?,
+                    subcomponent: LineParser::parsenum(subcomp)?,
                     count: LineParser::parsenum(count)?,
                     assm: LineParser::parsevec(a)?,
                 }),
