@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Lines};
 use std::iter::{Enumerate, Iterator};
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -120,7 +120,7 @@ pub struct LineParser {
 }
 
 impl LineParser {
-    pub fn from_file(path: &PathBuf) -> io::Result<Self> {
+    pub fn from_file(path: &Path) -> io::Result<Self> {
         Ok(LineParser {
             reader: BufReader::new(File::open(path)?).lines().enumerate(),
         })
@@ -166,7 +166,7 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "d" => match &data.split(|v| v == &"0").map(|s| s).collect::<Vec<_>>()[..] {
+            "d" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
                 [[idx, v @ ..], [c @ ..], []] => Ok(TraceLine::ComponentDef {
                     index: LineParser::parsenum(idx)?,
                     vars: LineParser::parsevec(v)?,
@@ -174,7 +174,7 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "ml" => match &data.split(|v| v == &"0").map(|s| s).collect::<Vec<_>>()[..] {
+            "ml" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
                 [[idx, comp, v @ ..], [c @ ..], [a @ ..], []] => Ok(TraceLine::ModelList {
                     index: LineParser::parsenum(idx)?,
                     component: LineParser::parsenum(comp)?,
@@ -246,8 +246,8 @@ impl Iterator for LineParser {
                     }
                 }
             }
-            Some((ln, Err(e))) => return Some((ln + 1, Err(ParseError::IOError(e)))),
-            None => return None,
+            Some((ln, Err(e))) => Some((ln + 1, Err(ParseError::IOError(e)))),
+            None => None,
         }
     }
 }
@@ -401,7 +401,7 @@ pub struct HeaderParser {
 }
 
 impl HeaderParser {
-    pub fn from_file(path: &PathBuf) -> io::Result<Self> {
+    pub fn from_file(path: &Path) -> io::Result<Self> {
         Ok(HeaderParser {
             lp: LineParser::from_file(path)?,
         })
