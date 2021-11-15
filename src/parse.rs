@@ -1,5 +1,7 @@
+use crate::*;
 use num_bigint::BigUint;
-use sharptrace_checker::*;
+use radix_trie::Trie;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Lines};
@@ -57,6 +59,40 @@ pub enum TraceLine {
 }
 
 #[derive(Error, Debug)]
+pub enum IntegrityError {
+    #[error("an invalid clause index was given")]
+    InvalidClauseIndex(),
+    #[error("the variable is invalid")]
+    InvalidVariable(),
+    #[error("the literal is invalid, because its variable is invalid")]
+    InvalidLiteral(),
+    #[error("variable / literal list contains duplicate elements (or is not sorted, which is an implementation error)")]
+    ListInconsistent(),
+    #[error("the component id {0} is not unique")]
+    DuplicateComponentId(ComponentIndex),
+    #[error("the model list id {0} is not unique")]
+    DuplicateListId(ListIndex),
+    #[error("a claim with the same assumption already exists for component {0}")]
+    DuplicateClaim(ComponentIndex),
+    #[error("component {0} this claim references is not (yet) defined")]
+    MissingComponentDef(ComponentIndex),
+    #[error("model list {0} this claim references is not (yet) defined")]
+    MissingModelList(ListIndex),
+    #[error("a claim for component {0} was given before all join lists where specified")]
+    ClaimBeforeJoinList(ComponentIndex),
+    #[error("the join list {0} is redundant for component {1}")]
+    RedundantJoinList(ListIndex, ComponentIndex),
+    #[error("a misplaced problem line within the trace")]
+    UnexpectedProblemLine(),
+    #[error("a misplaced clause line within the trace")]
+    UnexpectedClause(),
+    #[error("model is not an assignment over the list variables of model list {0}")]
+    InvalidModel(ListIndex),
+    #[error("the model was already given for model list {0}")]
+    DuplicateModel(ListIndex),
+}
+
+#[derive(Error, Debug)]
 pub enum ParseError {
     #[error("i/o error")]
     IOError(#[from] io::Error),
@@ -68,8 +104,17 @@ pub enum ParseError {
     MalformedLine(),
     #[error("unknown line type {0}.")]
     UnknownLineType(String),
+    #[error("the trace must start with a problem line")]
+    InvalidFirstLine(),
+    #[error("a trace line was given before all clauses where defined")]
+    ClausesNotFinished(),
+    #[error("the trace header is incomplete")]
+    IncompleteTraceHeader(),
+    #[error("a data integrity error")]
+    IntegrityError(#[from] IntegrityError),
 }
 
+#[derive(Debug)]
 pub struct LineParser {
     reader: Enumerate<Lines<BufReader<File>>>,
 }
@@ -85,10 +130,24 @@ impl LineParser {
         val.parse::<T>().map_err(|_e| ParseError::ConversionError())
     }
 
-    fn parsevec<T: FromStr>(val: &[&str]) -> Result<Vec<T>, ParseError> {
+    fn parsevec<T: FromStr + Ord>(val: &[&str]) -> Result<Vec<T>, ParseError> {
         val.iter()
             .map(|i| LineParser::parsenum(*i))
             .collect::<Result<Vec<_>, _>>()
+            .map(|mut v| {
+                v.sort_unstable();
+                v
+            })
+    }
+
+    fn parselits(val: &[&str]) -> Result<Vec<Lit>, ParseError> {
+        val.iter()
+            .map(|i| LineParser::parsenum(*i))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|mut v| {
+                v.sort_unstable_by(litcmp);
+                v
+            })
     }
 
     fn parse_line(t: &str, data: &[&str]) -> Result<TraceLine, ParseError> {
@@ -103,7 +162,7 @@ impl LineParser {
             "f" => match data {
                 [idx, l @ .., "0"] => Ok(TraceLine::Clause {
                     index: LineParser::parsenum(idx)?,
-                    lits: LineParser::parsevec(l)?,
+                    lits: LineParser::parselits(l)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
@@ -121,14 +180,14 @@ impl LineParser {
                     component: LineParser::parsenum(comp)?,
                     vars: LineParser::parsevec(v)?,
                     clauses: LineParser::parsevec(c)?,
-                    assm: LineParser::parsevec(a)?,
+                    assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
             "m" => match data {
                 [idx, l @ .., "0"] => Ok(TraceLine::Model {
                     list: LineParser::parsenum(idx)?,
-                    lits: LineParser::parsevec(l)?,
+                    lits: LineParser::parselits(l)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
@@ -136,7 +195,7 @@ impl LineParser {
                 [list, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
                     list: LineParser::parsenum(list)?,
                     count: LineParser::parsenum(count)?,
-                    assm: LineParser::parsevec(a)?,
+                    assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
@@ -151,7 +210,7 @@ impl LineParser {
                 [comp, count, a @ .., "0"] => Ok(TraceLine::JoinClaim {
                     component: LineParser::parsenum(comp)?,
                     count: LineParser::parsenum(count)?,
-                    assm: LineParser::parsevec(a)?,
+                    assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
@@ -160,7 +219,7 @@ impl LineParser {
                     list: LineParser::parsenum(list)?,
                     subcomponent: LineParser::parsenum(subcomp)?,
                     count: LineParser::parsenum(count)?,
-                    assm: LineParser::parsevec(a)?,
+                    assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
@@ -190,5 +249,206 @@ impl Iterator for LineParser {
             Some((ln, Err(e))) => return Some((ln + 1, Err(ParseError::IOError(e)))),
             None => return None,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct BodyParser {
+    trace: Trace,
+    lp: LineParser,
+    join_lists: BTreeMap<ComponentIndex, Vec<ListIndex>>,
+}
+
+// FIXME: eventually, this should work in a streaming fashion
+impl BodyParser {
+    fn checked_litvec(&self, vec: Vec<Lit>) -> Result<Vec<Lit>, IntegrityError> {
+        if vec.iter().any(|v| !self.trace.check_lit(*v)) {
+            Err(IntegrityError::InvalidVariable())
+        } else {
+            if !vec.windows(2).all(|w| w[0].abs() < w[1].abs()) {
+                return Err(IntegrityError::ListInconsistent());
+            };
+            Ok(vec)
+        }
+    }
+
+    fn checked_clausevec(&self, vec: Vec<ClauseIndex>) -> Result<Vec<ClauseIndex>, IntegrityError> {
+        if vec.iter().any(|v| !(*v > 0 && *v <= self.trace.n_clauses)) {
+            eprintln! {"{:?}", vec};
+            Err(IntegrityError::InvalidClauseIndex())
+        } else {
+            if !vec.windows(2).all(|w| w[0] < w[1]) {
+                return Err(IntegrityError::ListInconsistent());
+            };
+            Ok(vec)
+        }
+    }
+
+    fn parse_line(&mut self, line: TraceLine, ln: usize) -> Result<(), (usize, IntegrityError)> {
+        match line {
+            TraceLine::ComponentDef {
+                index,
+                vars,
+                clauses,
+            } => {
+                let comp = Component {
+                    index,
+                    vars: self.checked_litvec(vars).map_err(|e| (ln, e))?,
+                    clauses: self.checked_clausevec(clauses).map_err(|e| (ln, e))?,
+                };
+                if self.trace.components.insert(comp.index, comp).is_some() {
+                    return Err((ln, IntegrityError::DuplicateComponentId(index)));
+                }
+            }
+            TraceLine::ModelList {
+                index,
+                component,
+                vars,
+                clauses,
+                assm,
+            } => self
+                .trace
+                .insert_list(ModelList {
+                    index,
+                    component,
+                    vars: self.checked_litvec(vars).map_err(|e| (ln, e))?,
+                    clauses: self.checked_clausevec(clauses).map_err(|e| (ln, e))?,
+                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                    models: Trie::new(),
+                })
+                .map_err(|e| (ln, e))?,
+            TraceLine::Model { list, lits } => {
+                self.trace.insert_model(list, lits).map_err(|e| (ln, e))?
+            }
+            TraceLine::CompositionClaim { list, count, assm } => self
+                .trace
+                .insert_composition_claim(CompositionClaim {
+                    list,
+                    count,
+                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                })
+                .map_err(|e| (ln, e))?,
+            TraceLine::JoinList { list, component } => {
+                if self.trace.get_list(list).is_none() {
+                    return Err((ln, IntegrityError::MissingModelList(list)));
+                };
+                if self.trace.get_component_claims(component).is_some() {
+                    return Err((ln, IntegrityError::ClaimBeforeJoinList(component)));
+                }
+                let lists = match self.join_lists.get_mut(&component) {
+                    Some(l) => l,
+                    None => {
+                        self.join_lists.insert(component, Vec::new());
+                        self.join_lists.get_mut(&component).unwrap()
+                    }
+                };
+                if lists
+                    .iter()
+                    .any(|l| self.trace.get_list(*l).unwrap().component == component)
+                {
+                    return Err((ln, IntegrityError::RedundantJoinList(list, component)));
+                }
+                lists.push(list);
+            }
+            TraceLine::JoinClaim {
+                component,
+                count,
+                assm,
+            } => self
+                .trace
+                .insert_join_claim(JoinClaim {
+                    component,
+                    count,
+                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                    lists: match self.join_lists.get(&component) {
+                        Some(l) => l.clone(),
+                        None => return Err((ln, IntegrityError::ClaimBeforeJoinList(component))),
+                    },
+                })
+                .map_err(|e| (ln, e))?,
+            TraceLine::ExtensionClaim {
+                list,
+                subcomponent,
+                count,
+                assm,
+            } => self
+                .trace
+                .insert_extension_claim(ExtensionClaim {
+                    list,
+                    subcomponent,
+                    count,
+                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                })
+                .map_err(|e| (ln, e))?,
+            TraceLine::Problem { .. } => return Err((ln, IntegrityError::UnexpectedProblemLine())),
+            TraceLine::Clause { .. } => return Err((ln, IntegrityError::UnexpectedClause())),
+        }
+        Ok(())
+    }
+
+    pub fn parse_complete(mut self) -> Result<Trace, (usize, ParseError)> {
+        while let Some((ln, line)) = self.lp.next() {
+            self.parse_line(line.map_err(|e| (ln, e))?, ln)
+                .map_err(|(ln, e)| (ln, e.into()))?;
+        }
+        Ok(self.trace)
+    }
+}
+
+#[derive(Debug)]
+pub struct HeaderParser {
+    lp: LineParser,
+}
+
+impl HeaderParser {
+    pub fn from_file(path: &PathBuf) -> io::Result<Self> {
+        Ok(HeaderParser {
+            lp: LineParser::from_file(path)?,
+        })
+    }
+
+    pub fn read_to_body(mut self) -> Result<BodyParser, (usize, ParseError)> {
+        let mut problem = match self.lp.next() {
+            Some((_ln, Ok(TraceLine::Problem { nvars, nclauses }))) => Trace::new(nvars, nclauses),
+            Some((ln, Ok(_))) => return Err((ln, ParseError::InvalidFirstLine())),
+            Some((ln, Err(e))) => return Err((ln, e)),
+            None => return Err((0, ParseError::IncompleteTraceHeader())),
+        };
+
+        // fill with dummy clause 0
+        problem.clauses.resize(
+            problem.n_clauses + 1,
+            Clause {
+                index: 0,
+                lits: vec![],
+            },
+        );
+
+        let mut clauses_read = 0;
+
+        // read clauses
+        while clauses_read < problem.n_clauses {
+            match self.lp.next() {
+                Some((ln, Ok(TraceLine::Clause { index, lits }))) => {
+                    if index < 1 || index > problem.n_clauses || problem.clauses[index].index != 0 {
+                        return Err((ln, IntegrityError::InvalidClauseIndex().into()));
+                    }
+                    if lits.iter().any(|l| !problem.check_lit(*l)) {
+                        return Err((ln, IntegrityError::InvalidLiteral().into()));
+                    }
+                    problem.clauses[index] = Clause { index, lits };
+                    clauses_read += 1;
+                }
+                Some((ln, Ok(_))) => return Err((ln, ParseError::ClausesNotFinished())),
+                Some((ln, Err(e))) => return Err((ln, e)),
+                None => return Err((0, ParseError::IncompleteTraceHeader())),
+            }
+        }
+
+        Ok(BodyParser {
+            trace: problem,
+            lp: self.lp,
+            join_lists: BTreeMap::new(),
+        })
     }
 }

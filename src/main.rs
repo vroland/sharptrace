@@ -1,15 +1,14 @@
-mod parse;
-
-use crate::parse::LineParser;
+use sharptrace_checker::HeaderParser;
 use std::path::PathBuf;
 
 use std::io;
 
 fn main() -> io::Result<()> {
-    let parser = LineParser::from_file(&PathBuf::from("proof"))?;
+    let parser = HeaderParser::from_file(&PathBuf::from("proof"))?;
 
-    for (ln, l) in parser {
-        println!("line {}: {:?}", ln, l.expect("parse error:"));
-    }
+    eprintln!("parsing...");
+    let bp = parser.read_to_body().expect("parse error:");
+    let trace = bp.parse_complete().expect("parse error:");
+    eprintln!("{} components.", trace.components.len());
     Ok(())
 }
