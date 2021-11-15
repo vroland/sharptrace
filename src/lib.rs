@@ -1,5 +1,5 @@
 use num_bigint::BigUint;
-use radix_trie::Trie;
+use radix_trie::{Trie, TrieCommon};
 use std::collections::BTreeMap;
 
 mod parse;
@@ -189,5 +189,13 @@ impl Trace {
             return Err(IntegrityError::MissingComponentDef(claim.subcomponent));
         }
         self.insert_claim_unchecked(comp_id, claim.assm.clone(), Claim::Extension(claim))
+    }
+
+    pub fn print_stats(&self) {
+        eprintln! {"clauses: {}", self.n_clauses};
+        eprintln! {"variables: {}", self.n_vars};
+        eprintln! {"components: {}", self.components.len()};
+        eprintln! {"model lists: {} with {} models in total", self.lists.len(), self.lists.values().fold(0, |acc, l| acc + l.models.values().count())};
+        eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.values().count())};
     }
 }
