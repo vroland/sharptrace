@@ -272,7 +272,21 @@ impl BodyParser {
         }
     }
 
-    fn checked_clausevec(&self, vec: Vec<ClauseIndex>) -> Result<Vec<ClauseIndex>, IntegrityError> {
+    fn checked_varset(&self, mut vec: Vec<Lit>) -> Result<BTreeSet<Var>, IntegrityError> {
+        if vec.iter().any(|v| !self.trace.check_var(*v)) {
+            Err(IntegrityError::InvalidVariable())
+        } else {
+            if !vec.windows(2).all(|w| w[0] < w[1]) {
+                return Err(IntegrityError::ListInconsistent());
+            };
+            Ok(BTreeSet::from_iter(vec.drain(..)))
+        }
+    }
+
+    fn checked_clauseset(
+        &self,
+        mut vec: Vec<ClauseIndex>,
+    ) -> Result<BTreeSet<ClauseIndex>, IntegrityError> {
         if vec.iter().any(|v| !(*v > 0 && *v <= self.trace.n_clauses)) {
             eprintln! {"{:?}", vec};
             Err(IntegrityError::InvalidClauseIndex())
@@ -280,7 +294,7 @@ impl BodyParser {
             if !vec.windows(2).all(|w| w[0] < w[1]) {
                 return Err(IntegrityError::ListInconsistent());
             };
-            Ok(vec)
+            Ok(BTreeSet::from_iter(vec.drain(..)))
         }
     }
 
@@ -293,8 +307,8 @@ impl BodyParser {
             } => {
                 let comp = Component {
                     index,
-                    vars: self.checked_litvec(vars).map_err(|e| (ln, e))?,
-                    clauses: self.checked_clausevec(clauses).map_err(|e| (ln, e))?,
+                    vars: self.checked_varset(vars).map_err(|e| (ln, e))?,
+                    clauses: self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
                 };
                 if self.trace.components.insert(comp.index, comp).is_some() {
                     return Err((ln, IntegrityError::DuplicateComponentId(index)));
@@ -311,8 +325,8 @@ impl BodyParser {
                 .insert_list(ModelList {
                     index,
                     component,
-                    vars: self.checked_litvec(vars).map_err(|e| (ln, e))?,
-                    clauses: self.checked_clausevec(clauses).map_err(|e| (ln, e))?,
+                    vars: self.checked_varset(vars).map_err(|e| (ln, e))?,
+                    clauses: self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
                     assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
                     models: Trie::new(),
                 })

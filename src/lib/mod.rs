@@ -1,10 +1,12 @@
 use num_bigint::BigUint;
 use radix_trie::{Trie, TrieCommon};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod parse;
+mod verify;
 
 pub use parse::{BodyParser, HeaderParser, IntegrityError, ParseError};
+pub use verify::{VerificationError, Verifier};
 
 pub type Var = isize;
 pub type Lit = isize;
@@ -20,6 +22,10 @@ pub fn vars(lits: &[Lit]) -> Vec<Var> {
     lits.iter().map(|l| l.abs()).collect()
 }
 
+pub fn vars_set(lits: &[Lit]) -> BTreeSet<Var> {
+    BTreeSet::from_iter(lits.iter().map(|l| l.abs()))
+}
+
 #[derive(Debug, Clone)]
 pub struct Clause {
     pub index: ClauseIndex,
@@ -29,16 +35,16 @@ pub struct Clause {
 #[derive(Debug, Clone)]
 pub struct Component {
     pub index: ComponentIndex,
-    pub vars: Vec<Var>,
-    pub clauses: Vec<ClauseIndex>,
+    pub vars: BTreeSet<Var>,
+    pub clauses: BTreeSet<ClauseIndex>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelList {
     pub index: ListIndex,
     pub component: ComponentIndex,
-    pub vars: Vec<Var>,
-    pub clauses: Vec<ClauseIndex>,
+    pub vars: BTreeSet<Var>,
+    pub clauses: BTreeSet<ClauseIndex>,
     pub assm: Vec<Lit>,
     pub models: Trie<Vec<Lit>, ()>,
 }
@@ -126,7 +132,7 @@ impl Trace {
             Some(l) => l,
             None => return Err(IntegrityError::MissingModelList(list)),
         };
-        if vars(&model) != mlist.vars {
+        if vars_set(&model) != mlist.vars {
             return Err(IntegrityError::InvalidModel(list));
         }
         if mlist.models.insert(model, ()).is_some() {
@@ -137,6 +143,10 @@ impl Trace {
 
     pub fn get_list(&self, list: ListIndex) -> Option<&ModelList> {
         self.lists.get(&list)
+    }
+
+    pub fn get_lists(&self) -> impl Iterator<Item = &ListIndex> {
+        self.lists.keys()
     }
 
     pub fn get_component_claims(&self, comp: ComponentIndex) -> Option<&Trie<Vec<Lit>, Claim>> {

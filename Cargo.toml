@@ -5,7 +5,20 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+name="sharptrace_check"
+path="src/lib/mod.rs"
+
+[[bin]]
+name="sharptrace_checker"
+path="src/main.rs"
+
 [dependencies]
 radix_trie = "0.2"
 thiserror = "1.0"
 num-bigint = "0.4"
+varisat = "0.2"
+
+
+[profile.release]
+debug = 1
