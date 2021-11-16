@@ -1,4 +1,5 @@
 use num_bigint::BigUint;
+use num_traits::identities::One;
 use radix_trie::{Trie, TrieCommon};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +51,12 @@ pub struct ModelList {
 }
 
 #[derive(Debug, Clone)]
+pub struct ModelClaim {
+    pub list: ListIndex,
+    pub model: Vec<Lit>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CompositionClaim {
     pub list: ListIndex,
     pub count: BigUint,
@@ -74,17 +81,19 @@ pub struct ExtensionClaim {
 
 #[derive(Debug, Clone)]
 pub enum Claim {
+    Model(ModelClaim),
     Composition(CompositionClaim),
     Join(JoinClaim),
     Extension(ExtensionClaim),
 }
 
 impl Claim {
-    pub fn count(&self) -> &BigUint {
+    pub fn count(&self) -> BigUint {
         match self {
-            Claim::Composition(claim) => &claim.count,
-            Claim::Join(claim) => &claim.count,
-            Claim::Extension(claim) => &claim.count,
+            Claim::Model(_) => BigUint::one(),
+            Claim::Composition(claim) => claim.count.clone(),
+            Claim::Join(claim) => claim.count.clone(),
+            Claim::Extension(claim) => claim.count.clone(),
         }
     }
 }
@@ -198,6 +207,14 @@ impl Trace {
             None => return Err(IntegrityError::MissingModelList(claim.list)),
         };
         self.insert_claim_unchecked(comp_id, claim.assm.clone(), Claim::Composition(claim))
+    }
+
+    pub fn insert_model_claim(&mut self, claim: ModelClaim) -> Result<(), IntegrityError> {
+        let comp_id = match self.lists.get(&claim.list) {
+            Some(l) => l.component,
+            None => return Err(IntegrityError::MissingModelList(claim.list)),
+        };
+        self.insert_claim_unchecked(comp_id, claim.model.clone(), Claim::Model(claim))
     }
 
     pub fn insert_join_claim(&mut self, claim: JoinClaim) -> Result<(), IntegrityError> {

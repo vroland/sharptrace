@@ -169,8 +169,12 @@ impl Verifier {
         }
 
         let mut count = BigUint::zero();
+        // FIXME: optimize
         for m in mlist.models.keys() {
-            eprintln! {"looking for assm {:?}.", m};
+            let model_set = BTreeSet::from_iter(m.iter());
+            if !model_set.is_superset(&claim_assm) {
+                continue;
+            }
             if let Some(claim) = trace.claims.get(&mlist.component).unwrap().get(m) {
                 count += claim.count();
             } else {
@@ -182,7 +186,6 @@ impl Verifier {
             return Err(VerificationError::WrongCount(mlist.component));
         }
 
-        eprintln! {"claim for comp {} and assm {:?} verified.", mlist.component, composition.assm};
         Ok(())
     }
 

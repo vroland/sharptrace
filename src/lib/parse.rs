@@ -36,6 +36,10 @@ pub enum TraceLine {
         list: ListIndex,
         lits: Vec<Lit>,
     },
+    ModelClaim {
+        list: ListIndex,
+        model: Vec<Lit>,
+    },
     CompositionClaim {
         list: ListIndex,
         count: BigUint,
@@ -191,6 +195,13 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
+            "l" => match data {
+                [list, "1", a @ .., "0"] => Ok(TraceLine::ModelClaim {
+                    list: LineParser::parsenum(list)?,
+                    model: LineParser::parselits(a)?,
+                }),
+                _ => Err(ParseError::MalformedLine()),
+            },
             "a" => match data {
                 [list, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
                     list: LineParser::parsenum(list)?,
@@ -334,6 +345,13 @@ impl BodyParser {
             TraceLine::Model { list, lits } => {
                 self.trace.insert_model(list, lits).map_err(|e| (ln, e))?
             }
+            TraceLine::ModelClaim { list, model } => self
+                .trace
+                .insert_model_claim(ModelClaim {
+                    list,
+                    model: self.checked_litvec(model).map_err(|e| (ln, e))?,
+                })
+                .map_err(|e| (ln, e))?,
             TraceLine::CompositionClaim { list, count, assm } => self
                 .trace
                 .insert_composition_claim(CompositionClaim {
