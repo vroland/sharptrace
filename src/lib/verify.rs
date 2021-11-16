@@ -1,5 +1,6 @@
 use crate::*;
-use radix_trie::{Trie, TrieCommon};
+use num_traits::identities::Zero;
+use radix_trie::TrieCommon;
 use thiserror::Error;
 use varisat::{CnfFormula, ExtendFormula};
 
@@ -18,54 +19,65 @@ pub enum VerificationError {
     InvalidModelList(ClauseIndex, ListIndex),
     #[error("model list {0} is incomplete")]
     IncompleteModelList(ListIndex),
+    #[error("assumption of list {0} is insufficient for the claim")]
+    InsufficientAssumption(ListIndex),
+    #[error("no claim found for some model in list {0}")]
+    NoSupportingClaim(ListIndex),
+    #[error("claimed count is wrong for a claim of component {0}")]
+    WrongCount(ComponentIndex),
+}
+
+fn is_model_of<'a>(
+    trace: &Trace,
+    model: &[Lit],
+    mut clauses: impl Iterator<Item = &'a ClauseIndex>,
+) -> bool {
+    // FIXME: this can be accelerated, since model and clauses are sorted
+    clauses.all(|c| trace.clauses[*c].lits.iter().any(|l| model.contains(l)))
+}
+
+fn restrict_clause(clause: &[Lit], vars: &BTreeSet<Var>) -> Vec<Lit> {
+    clause
+        .iter()
+        .filter_map(|l| {
+            if vars.contains(&l.abs()) {
+                Some(*l)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn negate_model<'a>(m: &'a [Lit]) -> impl Iterator<Item = Lit> + 'a {
+    m.iter().map(|l| -l)
+}
+
+/// generate a mapping of variables to variable indices
+/// from a set of variables
+fn local_variable_mapping(vars: &BTreeSet<Var>) -> BTreeMap<Var, Var> {
+    let mut vec = vars.iter().map(|v| *v).collect::<Vec<_>>();
+    vec.sort_unstable();
+    BTreeMap::from_iter(vec.drain(..).enumerate().map(|(i, v)| (v, i as isize + 1)))
+}
+
+fn lits_to_varisat<'a>(
+    lits: impl IntoIterator<Item = &'a Lit>,
+    map: &BTreeMap<Var, Var>,
+) -> Vec<varisat::Lit> {
+    lits.into_iter()
+        .map(|l| l.signum() * map.get(&l.abs()).unwrap())
+        .map(|l| varisat::Lit::from_dimacs(l))
+        .collect::<Vec<_>>()
 }
 
 impl Verifier {
-    fn is_model_of<'a>(
+    /// checks that a given list matches the associated component
+    /// variables and clauses and returns list and component.
+    fn list_matches_component(
         trace: &Trace,
-        model: &[Lit],
-        mut clauses: impl Iterator<Item = &'a ClauseIndex>,
-    ) -> bool {
-        // FIXME: this can be accelerated, since model and clauses are sorted
-        clauses.all(|c| trace.clauses[*c].lits.iter().any(|l| model.contains(l)))
-    }
-
-    fn restrict_clause(clause: &[Lit], vars: &BTreeSet<Var>) -> Vec<Lit> {
-        clause
-            .iter()
-            .filter_map(|l| {
-                if vars.contains(&l.abs()) {
-                    Some(*l)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn negate_model<'a>(m: &'a [Lit]) -> impl Iterator<Item = Lit> + 'a {
-        m.iter().map(|l| -l)
-    }
-
-    fn lits_to_varisat<'a>(
-        lits: impl IntoIterator<Item = &'a Lit>,
-        map: &BTreeMap<Var, Var>,
-    ) -> Vec<varisat::Lit> {
-        lits.into_iter()
-            .map(|l| l.signum() * map.get(&l.abs()).unwrap())
-            .map(|l| varisat::Lit::from_dimacs(l))
-            .collect::<Vec<_>>()
-    }
-
-    /// generate a mapping of variables to variable indices
-    /// from a set of variables
-    fn local_variable_mapping(vars: &BTreeSet<Var>) -> BTreeMap<Var, Var> {
-        let mut vec = vars.iter().map(|v| *v).collect::<Vec<_>>();
-        vec.sort_unstable();
-        BTreeMap::from_iter(vec.drain(..).enumerate().map(|(i, v)| (v, i as isize + 1)))
-    }
-
-    pub fn verify_list(trace: &Trace, list: ListIndex) -> Result<(), VerificationError> {
+        list: ListIndex,
+    ) -> Result<(&ModelList, &Component), VerificationError> {
         let mlist = trace.get_list(list).unwrap();
         let comp = trace.components.get(&mlist.component).unwrap();
 
@@ -76,10 +88,15 @@ impl Verifier {
         if !mlist.clauses.is_subset(&comp.clauses) {
             return Err(VerificationError::InvalidListClauses(list));
         }
+        Ok((mlist, comp))
+    }
+
+    pub fn verify_list(trace: &Trace, list: ListIndex) -> Result<(), VerificationError> {
+        let (mlist, comp) = Verifier::list_matches_component(trace, list)?;
 
         // all models are models
         for model in mlist.models.keys() {
-            if !Verifier::is_model_of(trace, model, mlist.clauses.iter()) {
+            if !is_model_of(trace, model, mlist.clauses.iter()) {
                 return Err(VerificationError::NotAModel(list));
             }
         }
@@ -93,25 +110,25 @@ impl Verifier {
             .map(|c| *c)
             .collect();
 
-        let map = Verifier::local_variable_mapping(&mlist.vars);
+        let map = local_variable_mapping(&mlist.vars);
         let mut validation_formula = CnfFormula::new();
         validation_formula.set_var_count(mlist.vars.len());
         for l in &mlist.assm {
-            let varisat_clause = Verifier::lits_to_varisat(&[*l], &map);
+            let varisat_clause = lits_to_varisat(&[*l], &map);
             validation_formula.add_clause(&varisat_clause);
         }
         for cl in &directly_implied {
-            let restricted = Verifier::restrict_clause(&trace.clauses[*cl].lits, &mlist.vars);
-            let varisat_clause = Verifier::lits_to_varisat(&restricted, &map);
+            let restricted = restrict_clause(&trace.clauses[*cl].lits, &mlist.vars);
+            let varisat_clause = lits_to_varisat(&restricted, &map);
             validation_formula.add_clause(&varisat_clause);
         }
         let mut solver = varisat::Solver::new();
         solver.add_formula(&validation_formula);
 
         for cl in mlist.clauses.difference(&directly_implied) {
-            let restricted = Verifier::restrict_clause(&trace.clauses[*cl].lits, &mlist.vars);
-            let negated: Vec<_> = Verifier::negate_model(&restricted).collect();
-            let varisat_clause = Verifier::lits_to_varisat(&negated, &map);
+            let restricted = restrict_clause(&trace.clauses[*cl].lits, &mlist.vars);
+            let negated: Vec<_> = negate_model(&restricted).collect();
+            let varisat_clause = lits_to_varisat(&negated, &map);
             solver.assume(&varisat_clause);
             match solver.solve() {
                 // clause is implied
@@ -126,8 +143,8 @@ impl Verifier {
         validation_formula.set_var_count(mlist.vars.len());
 
         for model in mlist.models.keys() {
-            let negated: Vec<_> = Verifier::negate_model(&model).collect();
-            let clause = Verifier::lits_to_varisat(&negated, &map);
+            let negated: Vec<_> = negate_model(&model).collect();
+            let clause = lits_to_varisat(&negated, &map);
             model_formula.add_clause(&clause);
         }
         solver.add_formula(&model_formula);
@@ -135,6 +152,44 @@ impl Verifier {
             Ok(false) => Ok(()),
             Ok(true) => return Err(VerificationError::IncompleteModelList(mlist.index)),
             Err(e) => panic! {"sat solver error {:?}", e},
+        }
+    }
+
+    pub fn verify_composition(
+        trace: &Trace,
+        composition: &CompositionClaim,
+    ) -> Result<(), VerificationError> {
+        let (mlist, _comp) = Verifier::list_matches_component(trace, composition.list)?;
+
+        let list_assm = BTreeSet::from_iter(mlist.assm.iter());
+        let claim_assm = BTreeSet::from_iter(composition.assm.iter());
+
+        if !list_assm.is_subset(&claim_assm) {
+            return Err(VerificationError::InsufficientAssumption(composition.list));
+        }
+
+        let mut count = BigUint::zero();
+        for m in mlist.models.keys() {
+            eprintln! {"looking for assm {:?}.", m};
+            if let Some(claim) = trace.claims.get(&mlist.component).unwrap().get(m) {
+                count += claim.count();
+            } else {
+                return Err(VerificationError::NoSupportingClaim(composition.list));
+            }
+        }
+
+        if count != composition.count {
+            return Err(VerificationError::WrongCount(mlist.component));
+        }
+
+        eprintln! {"claim for comp {} and assm {:?} verified.", mlist.component, composition.assm};
+        Ok(())
+    }
+
+    pub fn verify_claim(trace: &Trace, claim: &Claim) -> Result<(), VerificationError> {
+        match claim {
+            Claim::Composition(c) => Verifier::verify_composition(trace, c),
+            _ => Ok(()),
         }
     }
 }

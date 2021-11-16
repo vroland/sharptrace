@@ -206,6 +206,7 @@ name = "sharptrace_checker"
 version = "0.1.0"
 dependencies = [
  "num-bigint",
+ "num-traits",
  "radix_trie",
  "thiserror",
  "varisat",

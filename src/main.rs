@@ -15,5 +15,9 @@ fn main() -> io::Result<()> {
     for list in trace.get_lists() {
         Verifier::verify_list(&trace, *list).expect("verification error:")
     }
+
+    for claim in trace.get_claims() {
+        Verifier::verify_claim(&trace, claim).expect("verification error:")
+    }
     Ok(())
 }

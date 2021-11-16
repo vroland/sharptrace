@@ -79,6 +79,16 @@ pub enum Claim {
     Extension(ExtensionClaim),
 }
 
+impl Claim {
+    pub fn count(&self) -> &BigUint {
+        match self {
+            Claim::Composition(claim) => &claim.count,
+            Claim::Join(claim) => &claim.count,
+            Claim::Extension(claim) => &claim.count,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Trace {
     pub n_vars: usize,
@@ -147,6 +157,10 @@ impl Trace {
 
     pub fn get_lists(&self) -> impl Iterator<Item = &ListIndex> {
         self.lists.keys()
+    }
+
+    pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
+        self.claims.values().map(|t| t.values()).flatten()
     }
 
     pub fn get_component_claims(&self, comp: ComponentIndex) -> Option<&Trie<Vec<Lit>, Claim>> {
