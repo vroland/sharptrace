@@ -42,8 +42,8 @@ pub enum TraceLine {
         assm: Vec<Lit>,
     },
     JoinList {
+        child: ComponentIndex,
         component: ComponentIndex,
-        list: ListIndex,
     },
     JoinClaim {
         component: ComponentIndex,
@@ -80,8 +80,8 @@ pub enum IntegrityError {
     MissingModelList(ListIndex),
     #[error("a claim for component {0} was given before all join lists where specified")]
     ClaimBeforeJoinList(ComponentIndex),
-    #[error("the join list {0} is redundant for component {1}")]
-    RedundantJoinList(ListIndex, ComponentIndex),
+    #[error("the join list component {0} is redundant for component {1}")]
+    RedundantJoinList(ComponentIndex, ComponentIndex),
     #[error("a misplaced problem line within the trace")]
     UnexpectedProblemLine(),
     #[error("a misplaced clause line within the trace")]
@@ -201,8 +201,8 @@ impl LineParser {
             },
             "jl" => match data {
                 [list, comp, "0"] => Ok(TraceLine::JoinList {
+                    child: LineParser::parsenum(list)?,
                     component: LineParser::parsenum(comp)?,
-                    list: LineParser::parsenum(list)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
@@ -256,7 +256,7 @@ impl Iterator for LineParser {
 pub struct BodyParser {
     trace: Trace,
     lp: LineParser,
-    join_lists: BTreeMap<ComponentIndex, Vec<ListIndex>>,
+    join_lists: BTreeMap<ComponentIndex, Vec<ComponentIndex>>,
 }
 
 // FIXME: eventually, this should work in a streaming fashion
@@ -342,9 +342,9 @@ impl BodyParser {
                     assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
-            TraceLine::JoinList { list, component } => {
-                if self.trace.get_list(list).is_none() {
-                    return Err((ln, IntegrityError::MissingModelList(list)));
+            TraceLine::JoinList { child, component } => {
+                if !self.trace.components.contains_key(&child) {
+                    return Err((ln, IntegrityError::MissingComponentDef(child)));
                 };
                 if self.trace.get_component_claims(component).is_some() {
                     return Err((ln, IntegrityError::ClaimBeforeJoinList(component)));
@@ -360,9 +360,9 @@ impl BodyParser {
                     .iter()
                     .any(|l| self.trace.get_list(*l).unwrap().component == component)
                 {
-                    return Err((ln, IntegrityError::RedundantJoinList(list, component)));
+                    return Err((ln, IntegrityError::RedundantJoinList(child, component)));
                 }
-                lists.push(list);
+                lists.push(child);
             }
             TraceLine::JoinClaim {
                 component,
@@ -374,7 +374,7 @@ impl BodyParser {
                     component,
                     count,
                     assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
-                    lists: match self.join_lists.get(&component) {
+                    child_components: match self.join_lists.get(&component) {
                         Some(l) => l.clone(),
                         None => return Err((ln, IntegrityError::ClaimBeforeJoinList(component))),
                     },

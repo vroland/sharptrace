@@ -61,7 +61,7 @@ pub struct JoinClaim {
     pub component: ComponentIndex,
     pub count: BigUint,
     pub assm: Vec<Lit>,
-    pub lists: Vec<ListIndex>,
+    pub child_components: Vec<ComponentIndex>,
 }
 
 #[derive(Debug, Clone)]
