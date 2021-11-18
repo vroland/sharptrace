@@ -1,5 +1,5 @@
 use crate::*;
-use num_traits::identities::Zero;
+use num_traits::identities::{One, Zero};
 use radix_trie::TrieCommon;
 use thiserror::Error;
 use varisat::{CnfFormula, ExtendFormula};
@@ -11,6 +11,8 @@ pub struct Verifier {}
 pub enum VerificationError {
     #[error("list {0} variables are not a subset of component variables")]
     InvalidListVariables(ListIndex),
+    #[error("assumption variables are not a subset of component {0} variables")]
+    InvalidAssumptionVariables(ComponentIndex),
     #[error("list {0} clauses are not a subset of component clauses")]
     InvalidListClauses(ListIndex),
     #[error("a model for list {0} is not a model")]
@@ -25,6 +27,18 @@ pub enum VerificationError {
     NoSupportingClaim(ListIndex),
     #[error("claimed count is wrong for a claim of component {0}")]
     WrongCount(ComponentIndex),
+    #[error("child component variables are not a subset of parent variables {0}")]
+    ChildVarsInvalid(ComponentIndex),
+    #[error("child component clauses are not a subset of parent clauses {0}")]
+    ChildClausesInvalid(ComponentIndex),
+    #[error("child component variables do not cover parent component {0}")]
+    ChildVarsInsufficient(ComponentIndex),
+    #[error("child component clauses do not cover parent component {0}")]
+    ChildClausesInsufficient(ComponentIndex),
+    #[error("the join assumption does not cover variable intersection")]
+    JoinAssumptionInsufficient(),
+    #[error("clause {0} of the child component {1} is illegal in join")]
+    IllegalClause(ClauseIndex, ComponentIndex),
 }
 
 fn is_model_of<'a>(
@@ -178,6 +192,7 @@ impl Verifier {
             if let Some(claim) = trace.claims.get(&mlist.component).unwrap().get(m) {
                 count += claim.count();
             } else {
+                eprintln! {"no claim matching {:?} for child {}", m, mlist.component};
                 return Err(VerificationError::NoSupportingClaim(composition.list));
             }
         }
@@ -189,9 +204,143 @@ impl Verifier {
         Ok(())
     }
 
+    fn find_implicit_claim(
+        trace: &Trace,
+        component: ComponentIndex,
+        implicit_assm: &[Lit],
+    ) -> Option<Claim> {
+        let comp_claims = trace.claims.get(&component).unwrap();
+        let assm_vars = vars(&implicit_assm);
+
+        for l in 0..implicit_assm.len() - 1 {
+            let prefix = Vec::from(&implicit_assm[0..l]);
+            if let Some(Claim::Composition(parent)) = comp_claims.get(&prefix) {
+                let mlist = trace.get_list(parent.list).unwrap();
+
+                let sibling_count = comp_claims
+                    .subtrie(&prefix)
+                    .unwrap()
+                    .iter()
+                    .filter(|(assm, _)| vars(assm) == assm_vars)
+                    .filter(|(_, claim)| {
+                        if let Claim::Composition(c) = claim {
+                            c.list == mlist.index
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(_, claim)| claim.count())
+                    .fold(BigUint::zero(), |acc, c| acc + c);
+                // siblings complete, we can instantiate an implicit claim
+                //
+                if sibling_count == parent.count {
+                    return Some(Claim::Composition(CompositionClaim {
+                        list: parent.list,
+                        assm: implicit_assm.to_vec(),
+                        count: BigUint::zero(),
+                    }));
+                }
+            }
+        }
+        return None;
+    }
+
+    pub fn verify_join(trace: &Trace, join: &JoinClaim) -> Result<(), VerificationError> {
+        let assm_vars = BTreeSet::from_iter(vars(&join.assm));
+        let component = trace.components.get(&join.component).unwrap();
+        let children = join
+            .child_components
+            .iter()
+            .map(|idx| trace.components.get(&idx).unwrap())
+            .collect::<Vec<_>>();
+
+        if !assm_vars.is_subset(&component.vars) {
+            return Err(VerificationError::InvalidAssumptionVariables(
+                join.component,
+            ));
+        }
+
+        if children.iter().any(|c| !c.vars.is_subset(&component.vars)) {
+            return Err(VerificationError::ChildVarsInvalid(join.component));
+        }
+        if children
+            .iter()
+            .any(|c| !c.clauses.is_subset(&component.clauses))
+        {
+            return Err(VerificationError::ChildClausesInvalid(join.component));
+        }
+
+        // do subcomponents cover parent components?
+        let vars_union = children.iter().fold(BTreeSet::new(), |acc, comp| {
+            BTreeSet::from_iter(acc.union(&comp.vars).map(|v| *v))
+        });
+
+        if vars_union != component.vars {
+            return Err(VerificationError::ChildVarsInsufficient(join.component));
+        }
+
+        let clauses_union = children.iter().fold(BTreeSet::new(), |acc, comp| {
+            BTreeSet::from_iter(acc.union(&comp.clauses).map(|c| *c))
+        });
+        if clauses_union != component.clauses {
+            return Err(VerificationError::ChildClausesInsufficient(join.component));
+        }
+
+        // are subcomponents mutually compatible?
+        for child_i in &children {
+            for child_j in &children {
+                if child_i.index == child_j.index {
+                    continue;
+                }
+
+                let intersection_vars = child_i.vars.intersection(&child_j.vars);
+                let intersection_vars = intersection_vars.map(|v| *v).collect();
+
+                if !assm_vars.is_superset(&intersection_vars) {
+                    return Err(VerificationError::JoinAssumptionInsufficient());
+                }
+
+                let i_only_vars = component.vars.difference(&child_i.vars);
+                let i_only_vars = i_only_vars.map(|v| *v).collect();
+
+                for cl in &child_i.clauses {
+                    let clause = &trace.clauses[*cl];
+                    if vars_set(&clause.lits).intersection(&i_only_vars).count() != 0 {
+                        return Err(VerificationError::IllegalClause(*cl, child_i.index));
+                    }
+                }
+            }
+        }
+
+        let mut count = BigUint::one();
+        for child_i in &children {
+            let child_assm = restrict_clause(&join.assm, &child_i.vars);
+            if let Some(claim) = trace.claims.get(&child_i.index).unwrap().get(&child_assm) {
+                count *= claim.count();
+            } else {
+                if let Some(claim) =
+                    Verifier::find_implicit_claim(&trace, child_i.index, &child_assm)
+                {
+                    count *= claim.count();
+                } else {
+                    eprintln! {"no claim matching {:?} for child {}", child_assm, child_i.index};
+                    return Err(VerificationError::NoSupportingClaim(join.component));
+                }
+            }
+        }
+
+        if count != join.count {
+            eprintln! {"component: {}, claimed count: {}, verified count: {}, assm: {:?}", join.component, join.count, count, join.assm};
+            return Err(VerificationError::WrongCount(join.component));
+        }
+
+        Ok(())
+    }
+
     pub fn verify_claim(trace: &Trace, claim: &Claim) -> Result<(), VerificationError> {
         match claim {
             Claim::Composition(c) => Verifier::verify_composition(trace, c),
+            Claim::Join(c) => Verifier::verify_join(trace, c),
             _ => Ok(()),
         }
     }

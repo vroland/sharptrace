@@ -16,8 +16,11 @@ fn main() -> io::Result<()> {
         Verifier::verify_list(&trace, *list).expect("verification error:")
     }
 
-    for claim in trace.get_claims() {
-        Verifier::verify_claim(&trace, claim).expect("verification error:")
+    for (i, claim) in trace.get_claims().enumerate() {
+        Verifier::verify_claim(&trace, claim).expect("verification error:");
+        if i % 1000 == 0 && i > 0 {
+            eprintln! {"{} claims verified.", i};
+        }
     }
     Ok(())
 }
