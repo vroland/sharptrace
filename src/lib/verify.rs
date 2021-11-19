@@ -1,11 +1,16 @@
 use crate::*;
 use num_traits::identities::{One, Zero};
 use radix_trie::TrieCommon;
+use std::collections::HashMap;
 use thiserror::Error;
 use varisat::{CnfFormula, ExtendFormula};
 
 #[derive(Debug)]
-pub struct Verifier {}
+pub struct Verifier<'t> {
+    // sets of assigned variables proven exhaustive for a given model list
+    implicitly_proven: HashMap<(ListIndex, Vec<Var>), ()>,
+    trace: &'t Trace,
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
@@ -85,15 +90,22 @@ fn lits_to_varisat<'a>(
         .collect::<Vec<_>>()
 }
 
-impl Verifier {
+impl<'t> Verifier<'t> {
+    pub fn new(trace: &'t Trace) -> Self {
+        Verifier {
+            implicitly_proven: HashMap::new(),
+            trace,
+        }
+    }
+
     /// checks that a given list matches the associated component
     /// variables and clauses and returns list and component.
     fn list_matches_component(
-        trace: &Trace,
+        &self,
         list: ListIndex,
     ) -> Result<(&ModelList, &Component), VerificationError> {
-        let mlist = trace.get_list(list).unwrap();
-        let comp = trace.components.get(&mlist.component).unwrap();
+        let mlist = self.trace.get_list(list).unwrap();
+        let comp = self.trace.components.get(&mlist.component).unwrap();
 
         if !mlist.vars.is_subset(&comp.vars) {
             return Err(VerificationError::InvalidListVariables(list));
@@ -105,12 +117,12 @@ impl Verifier {
         Ok((mlist, comp))
     }
 
-    pub fn verify_list(trace: &Trace, list: ListIndex) -> Result<(), VerificationError> {
-        let (mlist, comp) = Verifier::list_matches_component(trace, list)?;
+    pub fn verify_list(&self, list: ListIndex) -> Result<(), VerificationError> {
+        let (mlist, comp) = self.list_matches_component(list)?;
 
         // all models are models
         for model in mlist.models.keys() {
-            if !is_model_of(trace, model, mlist.clauses.iter()) {
+            if !is_model_of(self.trace, model, mlist.clauses.iter()) {
                 return Err(VerificationError::NotAModel(list));
             }
         }
@@ -120,7 +132,7 @@ impl Verifier {
         let directly_implied: BTreeSet<_> = mlist
             .clauses
             .iter()
-            .filter(|c| vars_set(&trace.clauses[**c].lits[..]).is_disjoint(&nolist_vars))
+            .filter(|c| vars_set(&self.trace.clauses[**c].lits[..]).is_disjoint(&nolist_vars))
             .map(|c| *c)
             .collect();
 
@@ -132,7 +144,7 @@ impl Verifier {
             validation_formula.add_clause(&varisat_clause);
         }
         for cl in &directly_implied {
-            let restricted = restrict_clause(&trace.clauses[*cl].lits, &mlist.vars);
+            let restricted = restrict_clause(&self.trace.clauses[*cl].lits, &mlist.vars);
             let varisat_clause = lits_to_varisat(&restricted, &map);
             validation_formula.add_clause(&varisat_clause);
         }
@@ -140,7 +152,7 @@ impl Verifier {
         solver.add_formula(&validation_formula);
 
         for cl in mlist.clauses.difference(&directly_implied) {
-            let restricted = restrict_clause(&trace.clauses[*cl].lits, &mlist.vars);
+            let restricted = restrict_clause(&self.trace.clauses[*cl].lits, &mlist.vars);
             let negated: Vec<_> = negate_model(&restricted).collect();
             let varisat_clause = lits_to_varisat(&negated, &map);
             solver.assume(&varisat_clause);
@@ -170,10 +182,10 @@ impl Verifier {
     }
 
     pub fn verify_composition(
-        trace: &Trace,
+        &self,
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let (mlist, _comp) = Verifier::list_matches_component(trace, composition.list)?;
+        let (mlist, _comp) = self.list_matches_component(composition.list)?;
 
         let list_assm = BTreeSet::from_iter(mlist.assm.iter());
         let claim_assm = BTreeSet::from_iter(composition.assm.iter());
@@ -189,7 +201,7 @@ impl Verifier {
             if !model_set.is_superset(&claim_assm) {
                 continue;
             }
-            if let Some(claim) = trace.claims.get(&mlist.component).unwrap().get(m) {
+            if let Some(claim) = self.trace.claims.get(&mlist.component).unwrap().get(m) {
                 count += claim.count();
             } else {
                 eprintln! {"no claim matching {:?} for child {}", m, mlist.component};
@@ -204,18 +216,21 @@ impl Verifier {
         Ok(())
     }
 
-    fn find_implicit_claim(
-        trace: &Trace,
-        component: ComponentIndex,
-        implicit_assm: &[Lit],
-    ) -> Option<Claim> {
-        let comp_claims = trace.claims.get(&component).unwrap();
+    fn is_implicit_claim(&mut self, component: ComponentIndex, implicit_assm: &[Lit]) -> bool {
+        let comp_claims = self.trace.claims.get(&component).unwrap();
         let assm_vars = vars(&implicit_assm);
 
         for l in 0..implicit_assm.len() - 1 {
             let prefix = Vec::from(&implicit_assm[0..l]);
             if let Some(Claim::Composition(parent)) = comp_claims.get(&prefix) {
-                let mlist = trace.get_list(parent.list).unwrap();
+                let mlist = self.trace.get_list(parent.list).unwrap();
+                // cache hit
+                if self
+                    .implicitly_proven
+                    .contains_key(&(parent.list, assm_vars.clone()))
+                {
+                    return true;
+                }
 
                 let sibling_count = comp_claims
                     .subtrie(&prefix)
@@ -231,27 +246,25 @@ impl Verifier {
                     })
                     .map(|(_, claim)| claim.count())
                     .fold(BigUint::zero(), |acc, c| acc + c);
+
                 // siblings complete, we can instantiate an implicit claim
-                //
                 if sibling_count == parent.count {
-                    return Some(Claim::Composition(CompositionClaim {
-                        list: parent.list,
-                        assm: implicit_assm.to_vec(),
-                        count: BigUint::zero(),
-                    }));
+                    self.implicitly_proven
+                        .insert((parent.list, assm_vars.clone()), ());
+                    return true;
                 }
             }
         }
-        return None;
+        return false;
     }
 
-    pub fn verify_join(trace: &Trace, join: &JoinClaim) -> Result<(), VerificationError> {
+    pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
         let assm_vars = BTreeSet::from_iter(vars(&join.assm));
-        let component = trace.components.get(&join.component).unwrap();
+        let component = self.trace.components.get(&join.component).unwrap();
         let children = join
             .child_components
             .iter()
-            .map(|idx| trace.components.get(&idx).unwrap())
+            .map(|idx| self.trace.components.get(&idx).unwrap())
             .collect::<Vec<_>>();
 
         if !assm_vars.is_subset(&component.vars) {
@@ -304,7 +317,7 @@ impl Verifier {
                 let i_only_vars = i_only_vars.map(|v| *v).collect();
 
                 for cl in &child_i.clauses {
-                    let clause = &trace.clauses[*cl];
+                    let clause = &self.trace.clauses[*cl];
                     if vars_set(&clause.lits).intersection(&i_only_vars).count() != 0 {
                         return Err(VerificationError::IllegalClause(*cl, child_i.index));
                     }
@@ -315,13 +328,17 @@ impl Verifier {
         let mut count = BigUint::one();
         for child_i in &children {
             let child_assm = restrict_clause(&join.assm, &child_i.vars);
-            if let Some(claim) = trace.claims.get(&child_i.index).unwrap().get(&child_assm) {
+            if let Some(claim) = self
+                .trace
+                .claims
+                .get(&child_i.index)
+                .unwrap()
+                .get(&child_assm)
+            {
                 count *= claim.count();
             } else {
-                if let Some(claim) =
-                    Verifier::find_implicit_claim(&trace, child_i.index, &child_assm)
-                {
-                    count *= claim.count();
+                if self.is_implicit_claim(child_i.index, &child_assm) {
+                    count = BigUint::zero();
                 } else {
                     eprintln! {"no claim matching {:?} for child {}", child_assm, child_i.index};
                     return Err(VerificationError::NoSupportingClaim(join.component));
@@ -337,10 +354,10 @@ impl Verifier {
         Ok(())
     }
 
-    pub fn verify_claim(trace: &Trace, claim: &Claim) -> Result<(), VerificationError> {
+    pub fn verify_claim(&mut self, claim: &Claim) -> Result<(), VerificationError> {
         match claim {
-            Claim::Composition(c) => Verifier::verify_composition(trace, c),
-            Claim::Join(c) => Verifier::verify_join(trace, c),
+            Claim::Composition(c) => self.verify_composition(c),
+            Claim::Join(c) => self.verify_join(c),
             _ => Ok(()),
         }
     }
