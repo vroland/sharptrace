@@ -1,14 +1,13 @@
 use crate::*;
 use num_traits::identities::{One, Zero};
-use radix_trie::TrieCommon;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use thiserror::Error;
 use varisat::{CnfFormula, ExtendFormula};
 
 #[derive(Debug)]
 pub struct Verifier<'t> {
     // sets of assigned variables proven exhaustive for a given model list
-    implicitly_proven: HashMap<(ListIndex, Vec<Var>), ()>,
+    implicitly_proven: HashSet<(ListIndex, BTreeSet<Var>)>,
     trace: &'t Trace,
 }
 
@@ -43,33 +42,35 @@ pub enum VerificationError {
     #[error("the join assumption does not cover variable intersection")]
     JoinAssumptionInsufficient(),
     #[error("clause {0} of the child component {1} is illegal in join")]
-    IllegalClause(ClauseIndex, ComponentIndex),
+    IllegalJoinClause(ClauseIndex, ComponentIndex),
+    #[error("clause {0} of the child component {1} is illegal in extension")]
+    IllegalExtensionClause(ClauseIndex, ComponentIndex),
 }
 
 fn is_model_of<'a>(
     trace: &Trace,
-    model: &[Lit],
+    model: &Model,
     mut clauses: impl Iterator<Item = &'a ClauseIndex>,
 ) -> bool {
     // FIXME: this can be accelerated, since model and clauses are sorted
     clauses.all(|c| trace.clauses[*c].lits.iter().any(|l| model.contains(l)))
 }
 
-fn restrict_clause(clause: &[Lit], vars: &BTreeSet<Var>) -> Vec<Lit> {
-    clause
-        .iter()
-        .filter_map(|l| {
-            if vars.contains(&l.abs()) {
-                Some(*l)
-            } else {
-                None
-            }
-        })
-        .collect()
+fn restrict_clause<'a, 'b: 'a>(
+    clause: impl Iterator<Item = &'a Lit> + 'a,
+    vars: &'b BTreeSet<Var>,
+) -> impl Iterator<Item = Lit> + 'a {
+    clause.filter_map(|l| {
+        if vars.contains(&l.var()) {
+            Some(*l)
+        } else {
+            None
+        }
+    })
 }
 
-fn negate_model<'a>(m: &'a [Lit]) -> impl Iterator<Item = Lit> + 'a {
-    m.iter().map(|l| -l)
+fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = Lit> + 'a {
+    m.map(|l| l.neg())
 }
 
 /// generate a mapping of variables to variable indices
@@ -81,11 +82,11 @@ fn local_variable_mapping(vars: &BTreeSet<Var>) -> BTreeMap<Var, Var> {
 }
 
 fn lits_to_varisat<'a>(
-    lits: impl IntoIterator<Item = &'a Lit>,
+    lits: impl IntoIterator<Item = Lit>,
     map: &BTreeMap<Var, Var>,
 ) -> Vec<varisat::Lit> {
     lits.into_iter()
-        .map(|l| l.signum() * map.get(&l.abs()).unwrap())
+        .map(|l| l.signum() * map.get(&l.var()).unwrap())
         .map(|l| varisat::Lit::from_dimacs(l))
         .collect::<Vec<_>>()
 }
@@ -93,7 +94,7 @@ fn lits_to_varisat<'a>(
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
-            implicitly_proven: HashMap::new(),
+            implicitly_proven: HashSet::new(),
             trace,
         }
     }
@@ -121,7 +122,7 @@ impl<'t> Verifier<'t> {
         let (mlist, comp) = self.list_matches_component(list)?;
 
         // all models are models
-        for model in mlist.models.keys() {
+        for model in &mlist.models {
             if !is_model_of(self.trace, model, mlist.clauses.iter()) {
                 return Err(VerificationError::NotAModel(list));
             }
@@ -132,7 +133,7 @@ impl<'t> Verifier<'t> {
         let directly_implied: BTreeSet<_> = mlist
             .clauses
             .iter()
-            .filter(|c| vars_set(&self.trace.clauses[**c].lits[..]).is_disjoint(&nolist_vars))
+            .filter(|c| vars_disjoint(self.trace.clauses[**c].lits.iter(), &nolist_vars))
             .map(|c| *c)
             .collect();
 
@@ -140,21 +141,21 @@ impl<'t> Verifier<'t> {
         let mut validation_formula = CnfFormula::new();
         validation_formula.set_var_count(mlist.vars.len());
         for l in &mlist.assm {
-            let varisat_clause = lits_to_varisat(&[*l], &map);
+            let varisat_clause = lits_to_varisat([*l], &map);
             validation_formula.add_clause(&varisat_clause);
         }
         for cl in &directly_implied {
-            let restricted = restrict_clause(&self.trace.clauses[*cl].lits, &mlist.vars);
-            let varisat_clause = lits_to_varisat(&restricted, &map);
+            let restricted = restrict_clause(self.trace.clauses[*cl].lits.iter(), &mlist.vars);
+            let varisat_clause = lits_to_varisat(restricted, &map);
             validation_formula.add_clause(&varisat_clause);
         }
         let mut solver = varisat::Solver::new();
         solver.add_formula(&validation_formula);
 
         for cl in mlist.clauses.difference(&directly_implied) {
-            let restricted = restrict_clause(&self.trace.clauses[*cl].lits, &mlist.vars);
-            let negated: Vec<_> = negate_model(&restricted).collect();
-            let varisat_clause = lits_to_varisat(&negated, &map);
+            let restricted = restrict_clause(self.trace.clauses[*cl].lits.iter(), &mlist.vars);
+            let negated = negate_model(restricted);
+            let varisat_clause = lits_to_varisat(negated, &map);
             solver.assume(&varisat_clause);
             match solver.solve() {
                 // clause is implied
@@ -168,9 +169,9 @@ impl<'t> Verifier<'t> {
         let mut model_formula = varisat::CnfFormula::new();
         validation_formula.set_var_count(mlist.vars.len());
 
-        for model in mlist.models.keys() {
-            let negated: Vec<_> = negate_model(&model).collect();
-            let clause = lits_to_varisat(&negated, &map);
+        for model in &mlist.models {
+            let negated = negate_model(model.iter().map(|l| *l));
+            let clause = lits_to_varisat(negated, &map);
             model_formula.add_clause(&clause);
         }
         solver.add_formula(&model_formula);
@@ -187,18 +188,14 @@ impl<'t> Verifier<'t> {
     ) -> Result<(), VerificationError> {
         let (mlist, _comp) = self.list_matches_component(composition.list)?;
 
-        let list_assm = BTreeSet::from_iter(mlist.assm.iter());
-        let claim_assm = BTreeSet::from_iter(composition.assm.iter());
-
-        if !list_assm.is_subset(&claim_assm) {
+        if !mlist.assm.is_subset(&composition.assm) {
             return Err(VerificationError::InsufficientAssumption(composition.list));
         }
 
         let mut count = BigUint::zero();
         // FIXME: optimize
-        for m in mlist.models.keys() {
-            let model_set = BTreeSet::from_iter(m.iter());
-            if !model_set.is_superset(&claim_assm) {
+        for m in &mlist.models {
+            if !m.is_superset(&composition.assm) {
                 continue;
             }
             if let Some(claim) = self.trace.claims.get(&mlist.component).unwrap().get(m) {
@@ -216,27 +213,34 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
-    fn is_implicit_claim(&mut self, component: ComponentIndex, implicit_assm: &[Lit]) -> bool {
+    fn is_implicit_claim(&mut self, component: ComponentIndex, implicit_assm: &Assumption) -> bool {
         let comp_claims = self.trace.claims.get(&component).unwrap();
-        let assm_vars = vars(&implicit_assm);
+        let assm_vars = BTreeSet::from_iter(vars_iter(implicit_assm.iter()));
 
-        for l in 0..implicit_assm.len() - 1 {
-            let prefix = Vec::from(&implicit_assm[0..l]);
-            if let Some(Claim::Composition(parent)) = comp_claims.get(&prefix) {
+        for (par_assm, pc) in comp_claims {
+            // early exit
+            if par_assm.len() >= implicit_assm.len() {
+                continue;
+            }
+
+            if !par_assm.is_subset(&implicit_assm) {
+                continue;
+            }
+
+            if let Claim::Composition(parent) = pc {
                 let mlist = self.trace.get_list(parent.list).unwrap();
+
                 // cache hit
-                if self
-                    .implicitly_proven
-                    .contains_key(&(parent.list, assm_vars.clone()))
-                {
+                let cache_key = (parent.list, vars_iter(implicit_assm.iter()).collect());
+                if self.implicitly_proven.contains(&cache_key) {
                     return true;
                 }
 
+                // FIXME: not sure how BTreeSet is ordered, so search all
                 let sibling_count = comp_claims
-                    .subtrie(&prefix)
-                    .unwrap()
                     .iter()
-                    .filter(|(assm, _)| vars(assm) == assm_vars)
+                    .filter(|(assm, _)| assm.len() == implicit_assm.len())
+                    .filter(|(assm, _)| vars_iter(assm.iter()).all(|v| assm_vars.contains(&v)))
                     .filter(|(_, claim)| {
                         if let Claim::Composition(c) = claim {
                             c.list == mlist.index
@@ -247,10 +251,15 @@ impl<'t> Verifier<'t> {
                     .map(|(_, claim)| claim.count())
                     .fold(BigUint::zero(), |acc, c| acc + c);
 
+                let filtered: Vec<_> = comp_claims
+                    .iter()
+                    .filter(|(assm, _)| assm.len() == implicit_assm.len())
+                    .map(|(assm, _)| assm)
+                    .collect();
+
                 // siblings complete, we can instantiate an implicit claim
                 if sibling_count == parent.count {
-                    self.implicitly_proven
-                        .insert((parent.list, assm_vars.clone()), ());
+                    self.implicitly_proven.insert(cache_key);
                     return true;
                 }
             }
@@ -259,7 +268,6 @@ impl<'t> Verifier<'t> {
     }
 
     pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
-        let assm_vars = BTreeSet::from_iter(vars(&join.assm));
         let component = self.trace.components.get(&join.component).unwrap();
         let children = join
             .child_components
@@ -267,7 +275,7 @@ impl<'t> Verifier<'t> {
             .map(|idx| self.trace.components.get(&idx).unwrap())
             .collect::<Vec<_>>();
 
-        if !assm_vars.is_subset(&component.vars) {
+        if !vars_subset(join.assm.iter(), &component.vars) {
             return Err(VerificationError::InvalidAssumptionVariables(
                 join.component,
             ));
@@ -309,25 +317,25 @@ impl<'t> Verifier<'t> {
                 let intersection_vars = child_i.vars.intersection(&child_j.vars);
                 let intersection_vars = intersection_vars.map(|v| *v).collect();
 
-                if !assm_vars.is_superset(&intersection_vars) {
+                if vars_subset(join.assm.iter(), &intersection_vars) {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
+            }
 
-                let i_only_vars = component.vars.difference(&child_i.vars);
-                let i_only_vars = i_only_vars.map(|v| *v).collect();
+            let i_only_vars = component.vars.difference(&child_i.vars);
+            let i_only_vars = i_only_vars.map(|v| *v).collect();
 
-                for cl in &child_i.clauses {
-                    let clause = &self.trace.clauses[*cl];
-                    if vars_set(&clause.lits).intersection(&i_only_vars).count() != 0 {
-                        return Err(VerificationError::IllegalClause(*cl, child_i.index));
-                    }
+            for cl in &child_i.clauses {
+                let clause = &self.trace.clauses[*cl];
+                if !vars_disjoint(clause.lits.iter(), &i_only_vars) {
+                    return Err(VerificationError::IllegalJoinClause(*cl, child_i.index));
                 }
             }
         }
 
         let mut count = BigUint::one();
         for child_i in &children {
-            let child_assm = restrict_clause(&join.assm, &child_i.vars);
+            let child_assm = restrict_clause(join.assm.iter(), &child_i.vars).collect();
             if let Some(claim) = self
                 .trace
                 .claims
@@ -349,6 +357,42 @@ impl<'t> Verifier<'t> {
         if count != join.count {
             eprintln! {"component: {}, claimed count: {}, verified count: {}, assm: {:?}", join.component, join.count, count, join.assm};
             return Err(VerificationError::WrongCount(join.component));
+        }
+
+        Ok(())
+    }
+
+    pub fn verify_extension(&self, extension: &ExtensionClaim) -> Result<(), VerificationError> {
+        let comp = self.trace.components.get(&extension.component).unwrap();
+        let subcomp = self.trace.components.get(&extension.subcomponent).unwrap();
+
+        if !subcomp.vars.is_subset(&comp.vars) {
+            return Err(VerificationError::ChildVarsInvalid(comp.index));
+        }
+        if !subcomp.clauses.is_subset(&comp.clauses) {
+            return Err(VerificationError::ChildClausesInvalid(comp.index));
+        }
+
+        // check allowed clauses
+        let introduced_vars = comp.vars.difference(&subcomp.vars).map(|v| *v).collect();
+        let restricted_assm = restrict_clause(extension.assm.iter(), &introduced_vars).collect();
+        for cl in &subcomp.clauses {
+            if !self.trace.clauses[*cl].lits.is_disjoint(&restricted_assm) {
+                return Err(VerificationError::IllegalExtensionClause(
+                    *cl,
+                    subcomp.index,
+                ));
+            }
+        }
+
+        let child_assm = restrict_clause(extension.assm.iter(), &subcomp.vars).collect();
+        let count = match self.trace.claims.get(&comp.index).unwrap().get(&child_assm) {
+            Some(claim) => claim.count(),
+            None => return Err(VerificationError::NoSupportingClaim(comp.index)),
+        };
+
+        if count != extension.count {
+            return Err(VerificationError::WrongCount(comp.index));
         }
 
         Ok(())

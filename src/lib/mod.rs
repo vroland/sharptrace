@@ -1,7 +1,8 @@
 use num_bigint::BigUint;
 use num_traits::identities::One;
-use radix_trie::{Trie, TrieCommon};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::str::FromStr;
 
 mod parse;
 mod verify;
@@ -10,7 +11,47 @@ pub use parse::{BodyParser, HeaderParser, IntegrityError, ParseError};
 pub use verify::{VerificationError, Verifier};
 
 pub type Var = isize;
-pub type Lit = isize;
+
+#[derive(Debug, Clone, Copy, Eq, Ord, Hash)]
+pub struct Lit(isize);
+
+impl Lit {
+    pub fn from_dimacs(l: isize) -> Self {
+        Lit(l)
+    }
+
+    pub fn signum(self) -> isize {
+        self.0.signum()
+    }
+
+    pub fn var(self) -> Var {
+        self.0.abs()
+    }
+
+    pub fn neg(self) -> Lit {
+        Lit(-self.0)
+    }
+}
+
+impl PartialEq for Lit {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialOrd for Lit {
+    fn partial_cmp(&self, other: &Lit) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl FromStr for Lit {
+    type Err = <usize as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        isize::from_str(s).map(|l| Self::from_dimacs(l))
+    }
+}
 
 /// A clause index.
 pub type ClauseIndex = usize;
@@ -18,19 +59,28 @@ pub type ClauseIndex = usize;
 pub type ComponentIndex = usize;
 /// A model list index.
 pub type ListIndex = usize;
+pub type Model = BTreeSet<Lit>;
+pub type Assumption = BTreeSet<Lit>;
 
-pub fn vars(lits: &[Lit]) -> Vec<Var> {
-    lits.iter().map(|l| l.abs()).collect()
+pub fn vars_iter<'a>(lits: impl Iterator<Item = &'a Lit> + 'a) -> impl Iterator<Item = Var> + 'a {
+    lits.map(|l| l.var())
 }
 
-pub fn vars_set(lits: &[Lit]) -> BTreeSet<Var> {
-    BTreeSet::from_iter(lits.iter().map(|l| l.abs()))
+pub fn vars_subset<'a, 'b>(
+    lits: impl Iterator<Item = &'b Lit> + 'b,
+    vars: &'a BTreeSet<Var>,
+) -> bool {
+    !vars_iter(lits).any(|v| !vars.contains(&v))
+}
+
+pub fn vars_disjoint<'a>(vars: impl Iterator<Item = &'a Lit> + 'a, other: &BTreeSet<Var>) -> bool {
+    !vars_iter(vars).any(|v| other.contains(&v))
 }
 
 #[derive(Debug, Clone)]
 pub struct Clause {
     pub index: ClauseIndex,
-    pub lits: Vec<Lit>,
+    pub lits: BTreeSet<Lit>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,37 +96,37 @@ pub struct ModelList {
     pub component: ComponentIndex,
     pub vars: BTreeSet<Var>,
     pub clauses: BTreeSet<ClauseIndex>,
-    pub assm: Vec<Lit>,
-    pub models: Trie<Vec<Lit>, ()>,
+    pub assm: Assumption,
+    pub models: BTreeSet<Model>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelClaim {
     pub list: ListIndex,
-    pub model: Vec<Lit>,
+    pub model: Model,
 }
 
 #[derive(Debug, Clone)]
 pub struct CompositionClaim {
     pub list: ListIndex,
     pub count: BigUint,
-    pub assm: Vec<Lit>,
+    pub assm: Assumption,
 }
 
 #[derive(Debug, Clone)]
 pub struct JoinClaim {
     pub component: ComponentIndex,
     pub count: BigUint,
-    pub assm: Vec<Lit>,
+    pub assm: Assumption,
     pub child_components: Vec<ComponentIndex>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExtensionClaim {
-    pub list: ListIndex,
+    pub component: ComponentIndex,
     pub subcomponent: ComponentIndex,
     pub count: BigUint,
-    pub assm: Vec<Lit>,
+    pub assm: Assumption,
 }
 
 #[derive(Debug, Clone)]
@@ -105,11 +155,7 @@ pub struct Trace {
     pub clauses: Vec<Clause>,
     pub components: BTreeMap<ComponentIndex, Component>,
     lists: BTreeMap<ListIndex, ModelList>,
-    claims: BTreeMap<ComponentIndex, Trie<Vec<Lit>, Claim>>,
-}
-
-pub fn litcmp(l1: &Lit, l2: &Lit) -> std::cmp::Ordering {
-    l1.abs().cmp(&l2.abs())
+    claims: HashMap<ComponentIndex, BTreeMap<Assumption, Claim>>,
 }
 
 impl Trace {
@@ -120,7 +166,7 @@ impl Trace {
 
     /// returns true if l is a valid literal of a variable of this trace.
     pub fn check_lit(&self, l: Lit) -> bool {
-        self.check_var(l.abs())
+        self.check_var(l.var())
     }
 
     pub fn new(vars: usize, clauses: usize) -> Self {
@@ -130,7 +176,7 @@ impl Trace {
             clauses: Vec::new(),
             components: BTreeMap::new(),
             lists: BTreeMap::new(),
-            claims: BTreeMap::new(),
+            claims: HashMap::new(),
         }
     }
 
@@ -146,15 +192,15 @@ impl Trace {
         Ok(())
     }
 
-    pub fn insert_model(&mut self, list: ListIndex, model: Vec<Lit>) -> Result<(), IntegrityError> {
+    pub fn insert_model(&mut self, list: ListIndex, model: Model) -> Result<(), IntegrityError> {
         let mlist = match self.lists.get_mut(&list) {
             Some(l) => l,
             None => return Err(IntegrityError::MissingModelList(list)),
         };
-        if vars_set(&model) != mlist.vars {
+        if !vars_subset(model.iter(), &mlist.vars) {
             return Err(IntegrityError::InvalidModel(list));
         }
-        if mlist.models.insert(model, ()).is_some() {
+        if !mlist.models.insert(model) {
             return Err(IntegrityError::DuplicateModel(list));
         }
         Ok(())
@@ -172,14 +218,17 @@ impl Trace {
         self.claims.values().map(|t| t.values()).flatten()
     }
 
-    pub fn get_component_claims(&self, comp: ComponentIndex) -> Option<&Trie<Vec<Lit>, Claim>> {
+    pub fn get_component_claims(
+        &self,
+        comp: ComponentIndex,
+    ) -> Option<&BTreeMap<Assumption, Claim>> {
         self.claims.get(&comp)
     }
 
     fn insert_claim_unchecked(
         &mut self,
         comp: ComponentIndex,
-        assm: Vec<Lit>,
+        assm: Assumption,
         claim: Claim,
     ) -> Result<(), IntegrityError> {
         if !self.components.contains_key(&comp) {
@@ -188,7 +237,7 @@ impl Trace {
         let comp_claims = match self.claims.get_mut(&comp) {
             Some(claims) => claims,
             None => {
-                self.claims.insert(comp, Trie::new());
+                self.claims.insert(comp, BTreeMap::new());
                 self.claims.get_mut(&comp).unwrap()
             }
         };
@@ -222,9 +271,9 @@ impl Trace {
     }
 
     pub fn insert_extension_claim(&mut self, claim: ExtensionClaim) -> Result<(), IntegrityError> {
-        let comp_id = match self.lists.get(&claim.list) {
+        let comp_id = match self.lists.get(&claim.component) {
             Some(l) => l.component,
-            None => return Err(IntegrityError::MissingModelList(claim.list)),
+            None => return Err(IntegrityError::MissingComponentDef(claim.component)),
         };
         if !self.components.contains_key(&claim.subcomponent) {
             return Err(IntegrityError::MissingComponentDef(claim.subcomponent));
@@ -236,7 +285,7 @@ impl Trace {
         eprintln! {"clauses: {}", self.n_clauses};
         eprintln! {"variables: {}", self.n_vars};
         eprintln! {"components: {}", self.components.len()};
-        eprintln! {"model lists: {} with {} models in total", self.lists.len(), self.lists.values().fold(0, |acc, l| acc + l.models.values().count())};
-        eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.values().count())};
+        eprintln! {"model lists: {} with {} models in total", self.lists.len(), self.lists.values().fold(0, |acc, l| acc + l.models.len())};
+        eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
 }

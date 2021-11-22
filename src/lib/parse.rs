@@ -1,6 +1,5 @@
 use crate::*;
 use num_bigint::BigUint;
-use radix_trie::Trie;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
@@ -55,7 +54,7 @@ pub enum TraceLine {
         assm: Vec<Lit>,
     },
     ExtensionClaim {
-        list: ListIndex,
+        component: ComponentIndex,
         subcomponent: ComponentIndex,
         count: BigUint,
         assm: Vec<Lit>,
@@ -149,7 +148,7 @@ impl LineParser {
             .map(|i| LineParser::parsenum(*i))
             .collect::<Result<Vec<_>, _>>()
             .map(|mut v| {
-                v.sort_unstable_by(litcmp);
+                v.sort_unstable();
                 v
             })
     }
@@ -226,8 +225,8 @@ impl LineParser {
                 _ => Err(ParseError::MalformedLine()),
             },
             "e" => match data {
-                [list, subcomp, count, a @ .., "0"] => Ok(TraceLine::ExtensionClaim {
-                    list: LineParser::parsenum(list)?,
+                [comp, subcomp, count, a @ .., "0"] => Ok(TraceLine::ExtensionClaim {
+                    component: LineParser::parsenum(comp)?,
                     subcomponent: LineParser::parsenum(subcomp)?,
                     count: LineParser::parsenum(count)?,
                     assm: LineParser::parselits(a)?,
@@ -272,18 +271,18 @@ pub struct BodyParser {
 
 // FIXME: eventually, this should work in a streaming fashion
 impl BodyParser {
-    fn checked_litvec(&self, vec: Vec<Lit>) -> Result<Vec<Lit>, IntegrityError> {
+    fn checked_litset(&self, vec: Vec<Lit>) -> Result<BTreeSet<Lit>, IntegrityError> {
         if vec.iter().any(|v| !self.trace.check_lit(*v)) {
             Err(IntegrityError::InvalidVariable())
         } else {
-            if !vec.windows(2).all(|w| w[0].abs() < w[1].abs()) {
+            if !vec.windows(2).all(|w| w[0] < w[1]) {
                 return Err(IntegrityError::ListInconsistent());
             };
-            Ok(vec)
+            Ok(BTreeSet::from_iter(vec))
         }
     }
 
-    fn checked_varset(&self, mut vec: Vec<Lit>) -> Result<BTreeSet<Var>, IntegrityError> {
+    fn checked_varset(&self, mut vec: Vec<Var>) -> Result<BTreeSet<Var>, IntegrityError> {
         if vec.iter().any(|v| !self.trace.check_var(*v)) {
             Err(IntegrityError::InvalidVariable())
         } else {
@@ -338,18 +337,19 @@ impl BodyParser {
                     component,
                     vars: self.checked_varset(vars).map_err(|e| (ln, e))?,
                     clauses: self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
-                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
-                    models: Trie::new(),
+                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
+                    models: BTreeSet::new(),
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::Model { list, lits } => {
-                self.trace.insert_model(list, lits).map_err(|e| (ln, e))?
+                let model = self.checked_litset(lits).map_err(|e| (ln, e))?;
+                self.trace.insert_model(list, model).map_err(|e| (ln, e))?
             }
             TraceLine::ModelClaim { list, model } => self
                 .trace
                 .insert_model_claim(ModelClaim {
                     list,
-                    model: self.checked_litvec(model).map_err(|e| (ln, e))?,
+                    model: self.checked_litset(model).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::CompositionClaim { list, count, assm } => self
@@ -357,7 +357,7 @@ impl BodyParser {
                 .insert_composition_claim(CompositionClaim {
                     list,
                     count,
-                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::JoinList { child, component } => {
@@ -391,7 +391,7 @@ impl BodyParser {
                 .insert_join_claim(JoinClaim {
                     component,
                     count,
-                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                     child_components: match self.join_lists.get(&component) {
                         Some(l) => l.clone(),
                         None => return Err((ln, IntegrityError::ClaimBeforeJoinList(component))),
@@ -399,17 +399,17 @@ impl BodyParser {
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::ExtensionClaim {
-                list,
+                component,
                 subcomponent,
                 count,
                 assm,
             } => self
                 .trace
                 .insert_extension_claim(ExtensionClaim {
-                    list,
+                    component,
                     subcomponent,
                     count,
-                    assm: self.checked_litvec(assm).map_err(|e| (ln, e))?,
+                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::Problem { .. } => return Err((ln, IntegrityError::UnexpectedProblemLine())),
@@ -452,7 +452,7 @@ impl HeaderParser {
             problem.n_clauses + 1,
             Clause {
                 index: 0,
-                lits: vec![],
+                lits: BTreeSet::new(),
             },
         );
 
@@ -461,13 +461,14 @@ impl HeaderParser {
         // read clauses
         while clauses_read < problem.n_clauses {
             match self.lp.next() {
-                Some((ln, Ok(TraceLine::Clause { index, lits }))) => {
+                Some((ln, Ok(TraceLine::Clause { index, mut lits }))) => {
                     if index < 1 || index > problem.n_clauses || problem.clauses[index].index != 0 {
                         return Err((ln, IntegrityError::InvalidClauseIndex().into()));
                     }
                     if lits.iter().any(|l| !problem.check_lit(*l)) {
                         return Err((ln, IntegrityError::InvalidLiteral().into()));
                     }
+                    let lits = BTreeSet::from_iter(lits.drain(..));
                     problem.clauses[index] = Clause { index, lits };
                     clauses_read += 1;
                 }
