@@ -364,4 +364,11 @@ impl Trace {
         eprintln! {"model lists: {} with {} models in total", self.lists.len(), self.lists.values().fold(0, |acc, l| acc + l.models.len())};
         eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
+
+    pub fn find_root_claim(&self) -> Option<&Claim> {
+        self.components
+            .values()
+            .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_clauses)
+            .and_then(|c| self.claims.get(&c.index).unwrap().get(&BTreeSet::new()))
+    }
 }

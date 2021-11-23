@@ -8,6 +8,8 @@ use varisat::{CnfFormula, ExtendFormula};
 pub struct Verifier<'t> {
     // sets of assigned variables proven exhaustive for a given model list
     implicitly_proven: HashSet<(ListIndex, BTreeSet<Var>)>,
+    // sets of proven component - subcomponent combinations for join
+    valid_join_subcomps: HashSet<(ComponentIndex, Vec<ComponentIndex>)>,
     trace: &'t Trace,
 }
 
@@ -97,6 +99,7 @@ impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
             implicitly_proven: HashSet::new(),
+            valid_join_subcomps: HashSet::new(),
             trace,
         }
     }
@@ -185,10 +188,11 @@ impl<'t> Verifier<'t> {
     }
 
     pub fn verify_composition(
-        &self,
+        &mut self,
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let (mlist, _comp) = self.list_matches_component(composition.list)?;
+        let (mlist, comp) = self.list_matches_component(composition.list)?;
+        let comp_id = comp.index;
 
         if !mlist.assm.is_subset(&composition.assm) {
             return Err(VerificationError::InsufficientAssumption(composition.list));
@@ -196,16 +200,16 @@ impl<'t> Verifier<'t> {
 
         let mut count = BigUint::zero();
         for m in mlist.find_models(&composition.assm) {
-            if let Some(claim) = self.trace.claims.get(&mlist.component).unwrap().get(&m) {
+            // find subclaim of same component, do not allow implicit claims
+            if let Some(claim) = self.trace.claims.get(&comp_id).unwrap().get(&m) {
                 count += claim.count();
             } else {
-                eprintln! {"no claim matching {:?} for child {}", m, mlist.component};
-                return Err(VerificationError::NoSupportingClaim(composition.list));
+                return Err(VerificationError::NoSupportingClaim(comp_id));
             }
         }
 
         if count != composition.count {
-            return Err(VerificationError::WrongCount(mlist.component));
+            return Err(VerificationError::WrongCount(comp_id));
         }
 
         Ok(())
@@ -259,28 +263,43 @@ impl<'t> Verifier<'t> {
         return false;
     }
 
-    pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
-        let component = self.trace.components.get(&join.component).unwrap();
-        let children = join
-            .child_components
-            .iter()
-            .map(|idx| self.trace.components.get(&idx).unwrap())
-            .collect::<Vec<_>>();
+    fn lookup_subclaim_count(
+        &mut self,
+        component: ComponentIndex,
+        assm: &Assumption,
+    ) -> Result<BigUint, VerificationError> {
+        if let Some(claim) = self.trace.claims.get(&component).unwrap().get(&assm) {
+            Ok(claim.count())
+        } else {
+            if self.is_implicit_claim(component, &assm) {
+                Ok(BigUint::zero())
+            } else {
+                Err(VerificationError::NoSupportingClaim(component))
+            }
+        }
+    }
 
-        if !vars_subset(join.assm.iter(), &component.vars) {
-            return Err(VerificationError::InvalidAssumptionVariables(
-                join.component,
-            ));
+    fn join_subcomponents_valid(
+        &mut self,
+        component: &Component,
+        children: &[&Component],
+    ) -> Result<(), VerificationError> {
+        let key = (
+            component.index,
+            children.iter().map(|comp| comp.index).collect(),
+        );
+        if self.valid_join_subcomps.contains(&key) {
+            return Ok(());
         }
 
         if children.iter().any(|c| !c.vars.is_subset(&component.vars)) {
-            return Err(VerificationError::ChildVarsInvalid(join.component));
+            return Err(VerificationError::ChildVarsInvalid(component.index));
         }
         if children
             .iter()
             .any(|c| !c.clauses.is_subset(&component.clauses))
         {
-            return Err(VerificationError::ChildClausesInvalid(join.component));
+            return Err(VerificationError::ChildClausesInvalid(component.index));
         }
 
         // do subcomponents cover parent components?
@@ -289,14 +308,48 @@ impl<'t> Verifier<'t> {
         });
 
         if vars_union != component.vars {
-            return Err(VerificationError::ChildVarsInsufficient(join.component));
+            return Err(VerificationError::ChildVarsInsufficient(component.index));
         }
 
         let clauses_union = children.iter().fold(BTreeSet::new(), |acc, comp| {
             BTreeSet::from_iter(acc.union(&comp.clauses).map(|c| *c))
         });
         if clauses_union != component.clauses {
-            return Err(VerificationError::ChildClausesInsufficient(join.component));
+            return Err(VerificationError::ChildClausesInsufficient(component.index));
+        }
+
+        // are subcomponents compatible?
+        for child_i in children {
+            let i_only_vars = component.vars.difference(&child_i.vars);
+            let i_only_vars = i_only_vars.map(|v| *v).collect();
+
+            for cl in &child_i.clauses {
+                let clause = &self.trace.clauses[*cl];
+                if !vars_disjoint(clause.lits.iter(), &i_only_vars) {
+                    return Err(VerificationError::IllegalJoinClause(*cl, child_i.index));
+                }
+            }
+        }
+
+        self.valid_join_subcomps.insert(key);
+        Ok(())
+    }
+
+    pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
+        let component = self.trace.components.get(&join.component).unwrap();
+        let children: Vec<_> = join
+            .child_components
+            .iter()
+            .map(|idx| self.trace.components.get(&idx).unwrap())
+            .collect();
+
+        // check child component validity
+        self.join_subcomponents_valid(component, &children)?;
+
+        if !vars_subset(join.assm.iter(), &component.vars) {
+            return Err(VerificationError::InvalidAssumptionVariables(
+                join.component,
+            ));
         }
 
         // are subcomponents mutually compatible?
@@ -313,37 +366,12 @@ impl<'t> Verifier<'t> {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
             }
-
-            let i_only_vars = component.vars.difference(&child_i.vars);
-            let i_only_vars = i_only_vars.map(|v| *v).collect();
-
-            for cl in &child_i.clauses {
-                let clause = &self.trace.clauses[*cl];
-                if !vars_disjoint(clause.lits.iter(), &i_only_vars) {
-                    return Err(VerificationError::IllegalJoinClause(*cl, child_i.index));
-                }
-            }
         }
 
         let mut count = BigUint::one();
         for child_i in &children {
             let child_assm = restrict_clause(join.assm.iter(), &child_i.vars).collect();
-            if let Some(claim) = self
-                .trace
-                .claims
-                .get(&child_i.index)
-                .unwrap()
-                .get(&child_assm)
-            {
-                count *= claim.count();
-            } else {
-                if self.is_implicit_claim(child_i.index, &child_assm) {
-                    count = BigUint::zero();
-                } else {
-                    eprintln! {"no claim matching {:?} for child {}", child_assm, child_i.index};
-                    return Err(VerificationError::NoSupportingClaim(join.component));
-                }
-            }
+            count *= self.lookup_subclaim_count(child_i.index, &child_assm)?;
         }
 
         if count != join.count {
@@ -381,23 +409,7 @@ impl<'t> Verifier<'t> {
         }
 
         let child_assm = restrict_clause(extension.assm.iter(), &subcomp.vars).collect();
-        let count = match self
-            .trace
-            .claims
-            .get(&subcomp.index)
-            .unwrap()
-            .get(&child_assm)
-        {
-            Some(claim) => claim.count(),
-            None => {
-                if self.is_implicit_claim(subcomp.index, &child_assm) {
-                    BigUint::zero()
-                } else {
-                    eprintln! {"claim assm: {:?}, child_assm: {:?}", extension.assm, child_assm};
-                    return Err(VerificationError::NoSupportingClaim(comp.index));
-                }
-            }
-        };
+        let count = self.lookup_subclaim_count(subcomp.index, &child_assm)?;
 
         if count != extension.count {
             return Err(VerificationError::WrongCount(comp.index));

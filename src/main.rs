@@ -14,15 +14,25 @@ fn main() -> io::Result<()> {
 
     let mut verifier = Verifier::new(&trace);
 
-    for list in trace.get_lists() {
+    let list_count = trace.get_lists().count();
+    for (i, list) in trace.get_lists().enumerate() {
+        if i % (list_count / 100) == 0 {
+            eprint! {"\rverifying lists... {}%", (i * 100) / list_count};
+        }
         verifier.verify_list(*list).expect("verification error:")
     }
+    eprintln! {"\rlists verified.           "};
 
+    let claim_count = trace.get_claims().count();
     for (i, claim) in trace.get_claims().enumerate() {
-        verifier.verify_claim(claim).expect("verification error:");
-        if i % 1000 == 0 && i > 0 {
-            eprintln! {"{} claims verified.", i};
+        if i % (claim_count / 100) == 0 {
+            eprint! {"\rverifying claims... {}%", (i * 100) / claim_count};
         }
+        verifier.verify_claim(claim).expect("verification error:");
     }
+    eprintln! {"\rclaims verified.          "};
+
+    let root = trace.find_root_claim().expect("no root claim!");
+    eprintln! {"root model count: {}", root.count()};
     Ok(())
 }
