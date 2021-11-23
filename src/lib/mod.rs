@@ -182,7 +182,7 @@ impl ModelList {
 
 #[derive(Debug, Clone)]
 pub struct ModelClaim {
-    pub list: ListIndex,
+    pub component: ComponentIndex,
     pub model: Model,
 }
 
@@ -339,11 +339,7 @@ impl Trace {
     }
 
     pub fn insert_model_claim(&mut self, claim: ModelClaim) -> Result<(), IntegrityError> {
-        let comp_id = match self.lists.get(&claim.list) {
-            Some(l) => l.component,
-            None => return Err(IntegrityError::MissingModelList(claim.list)),
-        };
-        self.insert_claim_unchecked(comp_id, claim.model.clone(), Claim::Model(claim))
+        self.insert_claim_unchecked(claim.component, claim.model.clone(), Claim::Model(claim))
     }
 
     pub fn insert_join_claim(&mut self, claim: JoinClaim) -> Result<(), IntegrityError> {

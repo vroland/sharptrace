@@ -45,6 +45,8 @@ pub enum VerificationError {
     IllegalJoinClause(ClauseIndex, ComponentIndex),
     #[error("clause {0} of the child component {1} is illegal in extension")]
     IllegalExtensionClause(ClauseIndex, ComponentIndex),
+    #[error("the assumption of this model claim is not a model")]
+    AssumptionNotAModel(),
 }
 
 fn is_model_of<'a>(
@@ -247,12 +249,6 @@ impl<'t> Verifier<'t> {
                     .map(|(_, claim)| claim.count())
                     .fold(BigUint::zero(), |acc, c| acc + c);
 
-                let filtered: Vec<_> = comp_claims
-                    .iter()
-                    .filter(|(assm, _)| assm.len() == implicit_assm.len())
-                    .map(|(assm, _)| assm)
-                    .collect();
-
                 // siblings complete, we can instantiate an implicit claim
                 if sibling_count == parent.count {
                     self.implicitly_proven.insert(cache_key);
@@ -358,7 +354,10 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
-    pub fn verify_extension(&self, extension: &ExtensionClaim) -> Result<(), VerificationError> {
+    pub fn verify_extension(
+        &mut self,
+        extension: &ExtensionClaim,
+    ) -> Result<(), VerificationError> {
         let comp = self.trace.components.get(&extension.component).unwrap();
         let subcomp = self.trace.components.get(&extension.subcomponent).unwrap();
 
@@ -382,9 +381,22 @@ impl<'t> Verifier<'t> {
         }
 
         let child_assm = restrict_clause(extension.assm.iter(), &subcomp.vars).collect();
-        let count = match self.trace.claims.get(&comp.index).unwrap().get(&child_assm) {
+        let count = match self
+            .trace
+            .claims
+            .get(&subcomp.index)
+            .unwrap()
+            .get(&child_assm)
+        {
             Some(claim) => claim.count(),
-            None => return Err(VerificationError::NoSupportingClaim(comp.index)),
+            None => {
+                if self.is_implicit_claim(subcomp.index, &child_assm) {
+                    BigUint::zero()
+                } else {
+                    eprintln! {"claim assm: {:?}, child_assm: {:?}", extension.assm, child_assm};
+                    return Err(VerificationError::NoSupportingClaim(comp.index));
+                }
+            }
         };
 
         if count != extension.count {
@@ -394,11 +406,30 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
+    pub fn verify_model_claim(&mut self, mc: &ModelClaim) -> Result<(), VerificationError> {
+        let comp = self.trace.components.get(&mc.component).unwrap();
+        let mc_vars = vars_iter(mc.model.iter()).collect();
+        if comp.vars != mc_vars {
+            return Err(VerificationError::InvalidAssumptionVariables(comp.index));
+        }
+        for cl in &comp.clauses {
+            if !mc
+                .model
+                .iter()
+                .any(|l| self.trace.clauses[*cl].lits.contains(l))
+            {
+                return Err(VerificationError::AssumptionNotAModel());
+            }
+        }
+        Ok(())
+    }
+
     pub fn verify_claim(&mut self, claim: &Claim) -> Result<(), VerificationError> {
         match claim {
             Claim::Composition(c) => self.verify_composition(c),
             Claim::Join(c) => self.verify_join(c),
-            _ => Ok(()),
+            Claim::Extension(c) => self.verify_extension(c),
+            Claim::Model(c) => self.verify_model_claim(c),
         }
     }
 }
