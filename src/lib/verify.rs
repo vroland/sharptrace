@@ -15,32 +15,32 @@ pub struct Verifier<'t> {
 
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
-    #[error("list {0} variables are not a subset of component variables")]
-    InvalidListVariables(ListIndex),
-    #[error("assumption variables are not a subset of component {0} variables")]
-    InvalidAssumptionVariables(ComponentIndex),
-    #[error("list {0} clauses are not a subset of component clauses")]
-    InvalidListClauses(ListIndex),
-    #[error("a model for list {0} is not a model")]
-    NotAModel(ListIndex),
-    #[error("clause {0} violates validity of model list {1}")]
-    InvalidModelList(ClauseIndex, ListIndex),
-    #[error("model list {0} is incomplete")]
-    IncompleteModelList(ListIndex),
-    #[error("assumption of list {0} is insufficient for the claim")]
-    InsufficientAssumption(ListIndex),
-    #[error("no claim found for some model in list {0}")]
-    NoSupportingClaim(ListIndex),
-    #[error("claimed count is wrong for a claim of component {0}")]
-    WrongCount(ComponentIndex),
-    #[error("child component variables are not a subset of parent variables {0}")]
-    ChildVarsInvalid(ComponentIndex),
-    #[error("child component clauses are not a subset of parent clauses {0}")]
-    ChildClausesInvalid(ComponentIndex),
-    #[error("child component variables do not cover parent component {0}")]
-    ChildVarsInsufficient(ComponentIndex),
-    #[error("child component clauses do not cover parent component {0}")]
-    ChildClausesInsufficient(ComponentIndex),
+    #[error("list variables are not a subset of component variables")]
+    InvalidListVariables(),
+    #[error("assumption variables are not a subset of component variables")]
+    InvalidAssumptionVariables(),
+    #[error("list clauses are not a subset of component clauses")]
+    InvalidListClauses(),
+    #[error("the assignment {0:?} is not a model")]
+    NotAModel(Box<Model>),
+    #[error("clause {0} violates model list validity")]
+    InvalidModelList(ClauseIndex),
+    #[error("the model list is incomplete")]
+    IncompleteModelList(),
+    #[error("assumption of list is insufficient for the claim")]
+    InsufficientAssumption(),
+    #[error("no claim found for list model {0:?}")]
+    NoSupportingClaim(Box<Model>),
+    #[error("claimed count is {0}, but verified count is {1}")]
+    WrongCount(BigUint, BigUint),
+    #[error("child component variables are not a subset of parent variables")]
+    ChildVarsInvalid(),
+    #[error("child component clauses are not a subset of parent clauses")]
+    ChildClausesInvalid(),
+    #[error("child component variables do not cover parent component")]
+    ChildVarsInsufficient(),
+    #[error("child component clauses do not cover parent component")]
+    ChildClausesInsufficient(),
     #[error("the join assumption does not cover variable intersection")]
     JoinAssumptionInsufficient(),
     #[error("clause {0} of the child component {1} is illegal in join")]
@@ -114,11 +114,11 @@ impl<'t> Verifier<'t> {
         let comp = self.trace.components.get(&mlist.component).unwrap();
 
         if !mlist.vars.is_subset(&comp.vars) {
-            return Err(VerificationError::InvalidListVariables(list));
+            return Err(VerificationError::InvalidListVariables());
         }
 
         if !mlist.clauses.is_subset(&comp.clauses) {
-            return Err(VerificationError::InvalidListClauses(list));
+            return Err(VerificationError::InvalidListClauses());
         }
         Ok((mlist, comp))
     }
@@ -129,7 +129,7 @@ impl<'t> Verifier<'t> {
         // all models are models
         for model in mlist.all_models() {
             if !is_model_of(self.trace, &model, mlist.clauses.iter()) {
-                return Err(VerificationError::NotAModel(list));
+                return Err(VerificationError::NotAModel(Box::new(model.clone())));
             }
         }
 
@@ -165,7 +165,7 @@ impl<'t> Verifier<'t> {
             match solver.solve() {
                 // clause is implied
                 Ok(false) => continue,
-                Ok(true) => return Err(VerificationError::InvalidModelList(mlist.index, *cl)),
+                Ok(true) => return Err(VerificationError::InvalidModelList(*cl)),
                 Err(e) => panic! {"sat solver error {:?}", e},
             }
         }
@@ -182,7 +182,7 @@ impl<'t> Verifier<'t> {
         solver.add_formula(&model_formula);
         match solver.solve() {
             Ok(false) => Ok(()),
-            Ok(true) => return Err(VerificationError::IncompleteModelList(mlist.index)),
+            Ok(true) => return Err(VerificationError::IncompleteModelList()),
             Err(e) => panic! {"sat solver error {:?}", e},
         }
     }
@@ -195,7 +195,7 @@ impl<'t> Verifier<'t> {
         let comp_id = comp.index;
 
         if !mlist.assm.is_subset(&composition.assm) {
-            return Err(VerificationError::InsufficientAssumption(composition.list));
+            return Err(VerificationError::InsufficientAssumption());
         }
 
         let mut count = BigUint::zero();
@@ -204,12 +204,15 @@ impl<'t> Verifier<'t> {
             if let Some(claim) = self.trace.claims.get(&comp_id).unwrap().get(&m) {
                 count += claim.count();
             } else {
-                return Err(VerificationError::NoSupportingClaim(comp_id));
+                return Err(VerificationError::NoSupportingClaim(Box::new(m.clone())));
             }
         }
 
         if count != composition.count {
-            return Err(VerificationError::WrongCount(comp_id));
+            return Err(VerificationError::WrongCount(
+                composition.count.clone(),
+                count,
+            ));
         }
 
         Ok(())
@@ -274,7 +277,7 @@ impl<'t> Verifier<'t> {
             if self.is_implicit_claim(component, &assm) {
                 Ok(BigUint::zero())
             } else {
-                Err(VerificationError::NoSupportingClaim(component))
+                Err(VerificationError::NoSupportingClaim(Box::new(assm.clone())))
             }
         }
     }
@@ -293,13 +296,13 @@ impl<'t> Verifier<'t> {
         }
 
         if children.iter().any(|c| !c.vars.is_subset(&component.vars)) {
-            return Err(VerificationError::ChildVarsInvalid(component.index));
+            return Err(VerificationError::ChildVarsInvalid());
         }
         if children
             .iter()
             .any(|c| !c.clauses.is_subset(&component.clauses))
         {
-            return Err(VerificationError::ChildClausesInvalid(component.index));
+            return Err(VerificationError::ChildClausesInvalid());
         }
 
         // do subcomponents cover parent components?
@@ -308,14 +311,14 @@ impl<'t> Verifier<'t> {
         });
 
         if vars_union != component.vars {
-            return Err(VerificationError::ChildVarsInsufficient(component.index));
+            return Err(VerificationError::ChildVarsInsufficient());
         }
 
         let clauses_union = children.iter().fold(BTreeSet::new(), |acc, comp| {
             BTreeSet::from_iter(acc.union(&comp.clauses).map(|c| *c))
         });
         if clauses_union != component.clauses {
-            return Err(VerificationError::ChildClausesInsufficient(component.index));
+            return Err(VerificationError::ChildClausesInsufficient());
         }
 
         // are subcomponents compatible?
@@ -347,9 +350,7 @@ impl<'t> Verifier<'t> {
         self.join_subcomponents_valid(component, &children)?;
 
         if !vars_subset(join.assm.iter(), &component.vars) {
-            return Err(VerificationError::InvalidAssumptionVariables(
-                join.component,
-            ));
+            return Err(VerificationError::InvalidAssumptionVariables());
         }
 
         // are subcomponents mutually compatible?
@@ -375,8 +376,7 @@ impl<'t> Verifier<'t> {
         }
 
         if count != join.count {
-            eprintln! {"component: {}, claimed count: {}, verified count: {}, assm: {:?}", join.component, join.count, count, join.assm};
-            return Err(VerificationError::WrongCount(join.component));
+            return Err(VerificationError::WrongCount(join.count.clone(), count));
         }
 
         Ok(())
@@ -390,10 +390,10 @@ impl<'t> Verifier<'t> {
         let subcomp = self.trace.components.get(&extension.subcomponent).unwrap();
 
         if !subcomp.vars.is_subset(&comp.vars) {
-            return Err(VerificationError::ChildVarsInvalid(comp.index));
+            return Err(VerificationError::ChildVarsInvalid());
         }
         if !subcomp.clauses.is_subset(&comp.clauses) {
-            return Err(VerificationError::ChildClausesInvalid(comp.index));
+            return Err(VerificationError::ChildClausesInvalid());
         }
 
         // check allowed clauses
@@ -412,7 +412,10 @@ impl<'t> Verifier<'t> {
         let count = self.lookup_subclaim_count(subcomp.index, &child_assm)?;
 
         if count != extension.count {
-            return Err(VerificationError::WrongCount(comp.index));
+            return Err(VerificationError::WrongCount(
+                extension.count.clone(),
+                count,
+            ));
         }
 
         Ok(())
@@ -422,7 +425,7 @@ impl<'t> Verifier<'t> {
         let comp = self.trace.components.get(&mc.component).unwrap();
         let mc_vars = vars_iter(mc.model.iter()).collect();
         if comp.vars != mc_vars {
-            return Err(VerificationError::InvalidAssumptionVariables(comp.index));
+            return Err(VerificationError::InvalidAssumptionVariables());
         }
         for cl in &comp.clauses {
             if !mc

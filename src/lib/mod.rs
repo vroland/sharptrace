@@ -2,6 +2,7 @@ use num_bigint::BigUint;
 use num_traits::identities::One;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 use std::str::FromStr;
 
 mod parse;
@@ -50,6 +51,12 @@ impl FromStr for Lit {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         isize::from_str(s).map(|l| Self::from_dimacs(l))
+    }
+}
+
+impl fmt::Display for Lit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -218,6 +225,14 @@ pub enum Claim {
 }
 
 impl Claim {
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Claim::Model(_) => "Model",
+            Claim::Composition(_) => "Composition",
+            Claim::Join(_) => "Join",
+            Claim::Extension(_) => "Extension",
+        }
+    }
     pub fn count(&self) -> BigUint {
         match self {
             Claim::Model(_) => BigUint::one(),
@@ -225,6 +240,37 @@ impl Claim {
             Claim::Join(claim) => claim.count.clone(),
             Claim::Extension(claim) => claim.count.clone(),
         }
+    }
+
+    pub fn assumption(&self) -> &Assumption {
+        match self {
+            Claim::Model(claim) => &claim.model,
+            Claim::Composition(claim) => &claim.assm,
+            Claim::Join(claim) => &claim.assm,
+            Claim::Extension(claim) => &claim.assm,
+        }
+    }
+
+    pub fn component(&self) -> ComponentIndex {
+        match self {
+            Claim::Model(claim) => claim.component,
+            Claim::Composition(claim) => claim.list,
+            Claim::Join(claim) => claim.component,
+            Claim::Extension(claim) => claim.component,
+        }
+    }
+}
+
+impl fmt::Display for Claim {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} claim: {} models for component/list {} under {:?}",
+            self.tag(),
+            self.count(),
+            self.component(),
+            self.assumption()
+        )
     }
 }
 
@@ -365,10 +411,15 @@ impl Trace {
         eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
 
-    pub fn find_root_claim(&self) -> Option<&Claim> {
-        self.components
+    pub fn find_root_claim(&self) -> Result<&Claim, IntegrityError> {
+        match self
+            .components
             .values()
             .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_clauses)
             .and_then(|c| self.claims.get(&c.index).unwrap().get(&BTreeSet::new()))
+        {
+            Some(claim) => Ok(claim),
+            None => Err(IntegrityError::NoRootClaim()),
+        }
     }
 }

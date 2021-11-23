@@ -93,6 +93,8 @@ pub enum IntegrityError {
     InvalidModel(ListIndex),
     #[error("the model was already given for model list {0}")]
     DuplicateModel(ListIndex),
+    #[error("no root claim was specified")]
+    NoRootClaim(),
 }
 
 #[derive(Error, Debug)]
