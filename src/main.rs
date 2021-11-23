@@ -63,7 +63,7 @@ fn main() -> Result<(), ProofError> {
     }
     eprintln! {"\rclaims verified.          "};
 
-    let root = trace.find_root_claim().map_err(|e| ParseError::from(e))?;
+    let root = trace.find_root_claim().map_err(ParseError::from)?;
     eprintln! {"root model count: {}", root.count()};
     Ok(())
 }

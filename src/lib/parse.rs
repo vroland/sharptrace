@@ -1,3 +1,4 @@
+use crate::list::ModelList;
 use crate::*;
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
@@ -334,14 +335,13 @@ impl BodyParser {
                 assm,
             } => self
                 .trace
-                .insert_list(ModelList {
+                .insert_list(ModelList::new(
                     index,
                     component,
-                    vars: self.checked_varset(vars).map_err(|e| (ln, e))?,
-                    clauses: self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
-                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
-                    models: BTreeSet::new(),
-                })
+                    self.checked_varset(vars).map_err(|e| (ln, e))?,
+                    self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
+                    self.checked_litset(assm).map_err(|e| (ln, e))?,
+                ))
                 .map_err(|e| (ln, e))?,
             TraceLine::Model { list, lits } => {
                 let model = self.checked_litset(lits).map_err(|e| (ln, e))?;
@@ -366,7 +366,7 @@ impl BodyParser {
                 if !self.trace.components.contains_key(&child) {
                     return Err((ln, IntegrityError::MissingComponentDef(child)));
                 };
-                if self.trace.get_component_claims(component).is_some() {
+                if self.trace.has_claims(component) {
                     return Err((ln, IntegrityError::ClaimBeforeJoinList(component)));
                 }
                 let lists = match self.join_lists.get_mut(&component) {
