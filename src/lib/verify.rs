@@ -122,8 +122,8 @@ impl<'t> Verifier<'t> {
         let (mlist, comp) = self.list_matches_component(list)?;
 
         // all models are models
-        for model in &mlist.models {
-            if !is_model_of(self.trace, model, mlist.clauses.iter()) {
+        for model in mlist.all_models() {
+            if !is_model_of(self.trace, &model, mlist.clauses.iter()) {
                 return Err(VerificationError::NotAModel(list));
             }
         }
@@ -169,7 +169,7 @@ impl<'t> Verifier<'t> {
         let mut model_formula = varisat::CnfFormula::new();
         validation_formula.set_var_count(mlist.vars.len());
 
-        for model in &mlist.models {
+        for model in mlist.all_models() {
             let negated = negate_model(model.iter().map(|l| *l));
             let clause = lits_to_varisat(negated, &map);
             model_formula.add_clause(&clause);
@@ -193,12 +193,8 @@ impl<'t> Verifier<'t> {
         }
 
         let mut count = BigUint::zero();
-        // FIXME: optimize
-        for m in &mlist.models {
-            if !m.is_superset(&composition.assm) {
-                continue;
-            }
-            if let Some(claim) = self.trace.claims.get(&mlist.component).unwrap().get(m) {
+        for m in mlist.find_models(&composition.assm) {
+            if let Some(claim) = self.trace.claims.get(&mlist.component).unwrap().get(&m) {
                 count += claim.count();
             } else {
                 eprintln! {"no claim matching {:?} for child {}", m, mlist.component};
