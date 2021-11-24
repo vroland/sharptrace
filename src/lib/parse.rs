@@ -90,8 +90,8 @@ pub enum IntegrityError {
     UnexpectedProblemLine(),
     #[error("a misplaced clause line within the trace")]
     UnexpectedClause(),
-    #[error("model is not an assignment over the list variables of model list {0}")]
-    InvalidModel(ListIndex),
+    #[error("model is not an assignment over the list variables of model list {0:?}")]
+    InvalidModel(Box<Model>),
     #[error("the model was already given for model list {0}")]
     DuplicateModel(ListIndex),
     #[error("no root claim was specified")]
@@ -159,7 +159,7 @@ impl LineParser {
     fn parse_line(t: &str, data: &[&str]) -> Result<TraceLine, ParseError> {
         match t {
             "p" => match data {
-                [nv, nc, "0"] => Ok(TraceLine::Problem {
+                ["st", nv, nc, "0"] => Ok(TraceLine::Problem {
                     nvars: LineParser::parsenum(nv)?,
                     nclauses: LineParser::parsenum(nc)?,
                 }),
@@ -366,7 +366,10 @@ impl BodyParser {
                 if !self.trace.components.contains_key(&child) {
                     return Err((ln, IntegrityError::MissingComponentDef(child)));
                 };
-                if self.trace.has_claims(component) {
+                if !self.trace.components.contains_key(&component) {
+                    return Err((ln, IntegrityError::MissingComponentDef(component)));
+                };
+                if self.trace.has_join_claims(component) {
                     return Err((ln, IntegrityError::ClaimBeforeJoinList(component)));
                 }
                 let lists = match self.join_lists.get_mut(&component) {

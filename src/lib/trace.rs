@@ -1,5 +1,5 @@
 use crate::list::*;
-use crate::utils::vars_subset;
+use crate::utils::vars_iter;
 use crate::{Assumption, ClauseIndex, ComponentIndex, IntegrityError, ListIndex, Lit, Model, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
@@ -155,8 +155,10 @@ impl Trace {
             Some(l) => l,
             None => return Err(IntegrityError::MissingModelList(list)),
         };
-        if !vars_subset(model.iter(), &mlist.vars) {
-            return Err(IntegrityError::InvalidModel(list));
+        let model_vars = BTreeSet::from_iter(vars_iter(model.iter()));
+        if model_vars != mlist.vars {
+            eprintln! {"model vars: {:?} list vars: {:?}", model_vars, mlist.vars};
+            return Err(IntegrityError::InvalidModel(Box::new(model)));
         }
         if !mlist.insert(model) {
             return Err(IntegrityError::DuplicateModel(list));
@@ -176,8 +178,16 @@ impl Trace {
         self.claims.values().map(|t| t.values()).flatten()
     }
 
-    pub fn has_claims(&self, comp: ComponentIndex) -> bool {
-        self.claims.get(&comp).is_some()
+    pub fn has_join_claims(&self, comp: ComponentIndex) -> bool {
+        self.claims
+            .get(&comp)
+            .and_then(|v| {
+                Some(v.values().any(|c| match c {
+                    Claim::Join(_) => true,
+                    _ => false,
+                }))
+            })
+            .unwrap_or(false)
     }
 
     pub fn component_claims(&self, comp: ComponentIndex) -> Option<&BTreeMap<Assumption, Claim>> {
@@ -230,14 +240,13 @@ impl Trace {
     }
 
     pub fn insert_extension_claim(&mut self, claim: ExtensionClaim) -> Result<(), IntegrityError> {
-        let comp_id = match self.lists.get(&claim.component) {
-            Some(l) => l.component,
-            None => return Err(IntegrityError::MissingComponentDef(claim.component)),
+        if !self.components.contains_key(&claim.component) {
+            return Err(IntegrityError::MissingComponentDef(claim.component));
         };
         if !self.components.contains_key(&claim.subcomponent) {
             return Err(IntegrityError::MissingComponentDef(claim.subcomponent));
         }
-        self.insert_claim_unchecked(comp_id, claim.assm.clone(), Claim::Extension(claim))
+        self.insert_claim_unchecked(claim.component, claim.assm.clone(), Claim::Extension(claim))
     }
 
     pub fn print_stats(&self) {
