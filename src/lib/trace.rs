@@ -109,7 +109,7 @@ impl fmt::Display for Claim {
 #[derive(Debug, Clone)]
 pub struct Trace {
     pub n_vars: usize,
-    pub n_clauses: usize,
+    pub n_orig_clauses: usize,
     pub clauses: Vec<Clause>,
     pub components: BTreeMap<ComponentIndex, Component>,
     lists: BTreeMap<ListIndex, ModelList>,
@@ -130,7 +130,7 @@ impl Trace {
     pub fn new(vars: usize, clauses: usize) -> Self {
         Trace {
             n_vars: vars,
-            n_clauses: clauses,
+            n_orig_clauses: clauses,
             clauses: Vec::new(),
             components: BTreeMap::new(),
             lists: BTreeMap::new(),
@@ -250,7 +250,7 @@ impl Trace {
     }
 
     pub fn print_stats(&self) {
-        eprintln! {"clauses: {}", self.n_clauses};
+        eprintln! {"clauses: {}", self.n_orig_clauses};
         eprintln! {"variables: {}", self.n_vars};
         eprintln! {"components: {}", self.components.len()};
         eprintln! {"model lists: {} with {} models in total", self.lists.len(), self.lists.values().fold(0, |acc, l| acc + l.len())};
@@ -261,7 +261,7 @@ impl Trace {
         match self
             .components
             .values()
-            .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_clauses)
+            .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_orig_clauses)
             .and_then(|c| self.claims.get(&c.index).unwrap().get(&BTreeSet::new()))
         {
             Some(claim) => Ok(claim),

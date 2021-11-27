@@ -20,6 +20,10 @@ pub enum TraceLine {
         index: ClauseIndex,
         lits: Vec<Lit>,
     },
+    IntroducedClause {
+        index: ClauseIndex,
+        lits: Vec<Lit>,
+    },
     ComponentDef {
         index: ComponentIndex,
         vars: Vec<Var>,
@@ -94,6 +98,8 @@ pub enum IntegrityError {
     InvalidModel(Box<Model>),
     #[error("the model was already given for model list {0}")]
     DuplicateModel(ListIndex),
+    #[error("next clause sequence number is {0} but should be {1}")]
+    InvalidIntroducedClauseIndex(ClauseIndex, ClauseIndex),
     #[error("no root claim was specified")]
     NoRootClaim(),
 }
@@ -167,6 +173,13 @@ impl LineParser {
             },
             "f" => match data {
                 [idx, l @ .., "0"] => Ok(TraceLine::Clause {
+                    index: LineParser::parsenum(idx)?,
+                    lits: LineParser::parselits(l)?,
+                }),
+                _ => Err(ParseError::MalformedLine()),
+            },
+            "n" => match data {
+                [idx, l @ .., "0"] => Ok(TraceLine::IntroducedClause {
                     index: LineParser::parsenum(idx)?,
                     lits: LineParser::parselits(l)?,
                 }),
@@ -300,11 +313,15 @@ impl BodyParser {
         &self,
         mut vec: Vec<ClauseIndex>,
     ) -> Result<BTreeSet<ClauseIndex>, IntegrityError> {
-        if vec.iter().any(|v| !(*v > 0 && *v <= self.trace.n_clauses)) {
+        if vec
+            .iter()
+            .any(|v| !(*v > 0 && *v <= self.trace.clauses.len()))
+        {
             eprintln! {"{:?}", vec};
             Err(IntegrityError::InvalidClauseIndex())
         } else {
             if !vec.windows(2).all(|w| w[0] < w[1]) {
+                eprintln! {"{:?}", vec};
                 return Err(IntegrityError::ListInconsistent());
             };
             Ok(BTreeSet::from_iter(vec.drain(..)))
@@ -417,6 +434,20 @@ impl BodyParser {
                     assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
+
+            TraceLine::IntroducedClause { index, mut lits } => {
+                if index != self.trace.clauses.len() {
+                    return Err((
+                        ln,
+                        IntegrityError::InvalidIntroducedClauseIndex(
+                            index,
+                            self.trace.clauses.len(),
+                        ),
+                    ));
+                }
+                let lits = BTreeSet::from_iter(lits.drain(..));
+                self.trace.clauses.push(Clause { index, lits });
+            }
             TraceLine::Problem { .. } => return Err((ln, IntegrityError::UnexpectedProblemLine())),
             TraceLine::Clause { .. } => return Err((ln, IntegrityError::UnexpectedClause())),
         }
@@ -454,7 +485,7 @@ impl HeaderParser {
 
         // fill with dummy clause 0
         problem.clauses.resize(
-            problem.n_clauses + 1,
+            problem.n_orig_clauses + 1,
             Clause {
                 index: 0,
                 lits: BTreeSet::new(),
@@ -464,10 +495,13 @@ impl HeaderParser {
         let mut clauses_read = 0;
 
         // read clauses
-        while clauses_read < problem.n_clauses {
+        while clauses_read < problem.n_orig_clauses {
             match self.lp.next() {
                 Some((ln, Ok(TraceLine::Clause { index, mut lits }))) => {
-                    if index < 1 || index > problem.n_clauses || problem.clauses[index].index != 0 {
+                    if index < 1
+                        || index > problem.n_orig_clauses
+                        || problem.clauses[index].index != 0
+                    {
                         return Err((ln, IntegrityError::InvalidClauseIndex().into()));
                     }
                     if lits.iter().any(|l| !problem.check_lit(*l)) {
