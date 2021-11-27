@@ -9,7 +9,7 @@ pub fn vars_subset<'a, 'b>(
     lits: impl Iterator<Item = &'b Lit> + 'b,
     vars: &'a BTreeSet<Var>,
 ) -> bool {
-    !vars_iter(lits).any(|v| !vars.contains(&v))
+    vars_iter(lits).all(|v| vars.contains(&v))
 }
 
 pub fn vars_disjoint<'a>(vars: impl Iterator<Item = &'a Lit> + 'a, other: &BTreeSet<Var>) -> bool {

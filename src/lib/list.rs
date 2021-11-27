@@ -85,24 +85,23 @@ impl ModelList {
             }
         }
 
-        let mut elements: Vec<_> = self
-            .vars
+        //let mut elements: Vec<_> = self
+        //    .vars
+        //    .iter()
+        //    .rev()
+        //    .enumerate()
+        //    .filter(|(_i, v)| !vars_iter(assm.iter()).any(|av| av == **v))
+        //    .map(|(i, _)| 1 << i)
+        //    .collect();
+
+        //elements.reverse();
+
+        //eprintln! {"combinations len: {}", elements.len()};
+        //let mut ranges = vec![];
+        //Self::generate_ranges(&elements[..], base_index, &mut ranges);
+
+        self.models
             .iter()
-            .rev()
-            .enumerate()
-            .filter(|(_i, v)| !vars_iter(assm.iter()).any(|av| av == **v))
-            .map(|(i, _)| 1 << i)
-            .collect();
-
-        elements.reverse();
-
-        let mut ranges = vec![];
-        Self::generate_ranges(&elements[..], base_index, &mut ranges);
-
-        ranges
-            .into_iter()
-            .map(|r| self.models.range(r))
-            .flatten()
             .filter(move |bm| *bm & assm_mask == base_index)
             .map(|bm| self.bin_to_model(*bm))
     }

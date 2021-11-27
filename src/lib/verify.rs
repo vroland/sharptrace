@@ -88,12 +88,9 @@ fn local_variable_mapping(vars: &BTreeSet<Var>) -> BTreeMap<Var, Var> {
     BTreeMap::from_iter(vec.drain(..).enumerate().map(|(i, v)| (v, i as isize + 1)))
 }
 
-fn lits_to_varisat(
-    lits: impl IntoIterator<Item = Lit>,
-    map: &BTreeMap<Var, Var>,
-) -> Vec<varisat::Lit> {
+fn lits_to_varisat(lits: impl IntoIterator<Item = Lit>) -> Vec<varisat::Lit> {
     lits.into_iter()
-        .map(|l| l.signum() * map.get(&l.var()).unwrap())
+        .map(|l| l.signum() * l.var())
         .map(varisat::Lit::from_dimacs)
         .collect::<Vec<_>>()
 }
@@ -137,57 +134,76 @@ impl<'t> Verifier<'t> {
         }
 
         // validity condition
-        let nolist_vars = comp.vars.difference(&mlist.vars).copied().collect();
-        let directly_implied: BTreeSet<_> = mlist
-            .clauses
-            .iter()
-            .filter(|c| vars_disjoint(self.trace.clauses[**c].lits.iter(), &nolist_vars))
-            .copied()
-            .collect();
-
-        let map = local_variable_mapping(&mlist.vars);
         let mut validation_formula = CnfFormula::new();
-        validation_formula.set_var_count(mlist.vars.len());
+        validation_formula.set_var_count(self.trace.n_vars);
+
+        for clause in &self.trace.clauses {
+            let varisat_clause = lits_to_varisat(clause.lits.iter().copied());
+            validation_formula.add_clause(&varisat_clause);
+        }
         for l in &mlist.assm {
-            let varisat_clause = lits_to_varisat([*l], &map);
+            let varisat_clause = lits_to_varisat([*l]);
             validation_formula.add_clause(&varisat_clause);
         }
-        for cl in &directly_implied {
-            let restricted = restrict_clause(self.trace.clauses[*cl].lits.iter(), &mlist.vars);
-            let varisat_clause = lits_to_varisat(restricted, &map);
-            validation_formula.add_clause(&varisat_clause);
+        for model in mlist.all_models() {
+            let negated = negate_model(model.iter().copied());
+            let clause = lits_to_varisat(negated);
+            validation_formula.add_clause(&clause);
         }
+
         let mut solver = varisat::Solver::new();
         solver.add_formula(&validation_formula);
 
-        for cl in mlist.clauses.difference(&directly_implied) {
-            let restricted = restrict_clause(self.trace.clauses[*cl].lits.iter(), &mlist.vars);
-            let negated = negate_model(restricted);
-            let varisat_clause = lits_to_varisat(negated, &map);
-            solver.assume(&varisat_clause);
-            match solver.solve() {
-                // clause is implied
-                Ok(false) => continue,
-                Ok(true) => return Err(VerificationError::InvalidModelList(*cl)),
-                Err(e) => panic! {"sat solver error {:?}", e},
-            }
-        }
-
-        // completeness
-        let mut model_formula = varisat::CnfFormula::new();
-        validation_formula.set_var_count(mlist.vars.len());
-
-        for model in mlist.all_models() {
-            let negated = negate_model(model.iter().copied());
-            let clause = lits_to_varisat(negated, &map);
-            model_formula.add_clause(&clause);
-        }
-        solver.add_formula(&model_formula);
         match solver.solve() {
+            // clause is implied
             Ok(false) => Ok(()),
-            Ok(true) => Err(VerificationError::IncompleteModelList()),
+            // clause is not implied
+            Ok(true) => Err(VerificationError::InvalidModelList(0)),
             Err(e) => panic! {"sat solver error {:?}", e},
         }
+
+        //let mut added_clauses = implied.clone();
+        //while !added_clauses.is_empty() {
+        //    for cl in &added_clauses {
+        //        let lits = self.trace.clauses[*cl].lits.iter().copied();
+        //        let varisat_clause = lits_to_varisat(lits);
+        //        solver.add_clause(&varisat_clause);
+        //        implied.insert(*cl);
+        //    }
+        //    eprintln! {"newly added: {:?}", added_clauses};
+        //    eprintln! {"implied: {:?}", implied};
+        //    added_clauses.clear();
+
+        //    for cl in mlist.clauses.difference(&implied) {
+        //        let lits = self.trace.clauses[*cl].lits.iter().copied();
+        //        let negated = negate_model(lits);
+        //        let varisat_clause = lits_to_varisat(negated);
+        //        solver.assume(&varisat_clause);
+        //        match solver.solve() {
+        //            // clause is implied
+        //            Ok(false) => added_clauses.insert(*cl),
+        //            // clause is not implied
+        //            Ok(true) => continue,
+        //            Err(e) => panic! {"sat solver error {:?}", e},
+        //        };
+        //    }
+        //}
+
+        //// completeness
+        //let mut model_formula = varisat::CnfFormula::new();
+        //validation_formula.set_var_count(self.trace.n_vars);
+
+        //for model in mlist.all_models() {
+        //    let negated = negate_model(model.iter().copied());
+        //    let clause = lits_to_varisat(negated);
+        //    model_formula.add_clause(&clause);
+        //}
+        //solver.add_formula(&model_formula);
+        //match solver.solve() {
+        //    Ok(false) => Ok(()),
+        //    Ok(true) => Err(VerificationError::IncompleteModelList()),
+        //    Err(e) => panic! {"sat solver error {:?}", e},
+        //}
     }
 
     pub fn verify_composition(
@@ -364,7 +380,7 @@ impl<'t> Verifier<'t> {
                 let intersection_vars = child_i.vars.intersection(&child_j.vars);
                 let intersection_vars = intersection_vars.copied().collect();
 
-                if vars_subset(join.assm.iter(), &intersection_vars) {
+                if !vars_subset(join.assm.iter(), &intersection_vars) {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
             }

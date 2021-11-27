@@ -15,7 +15,7 @@ pub use verify::{VerificationError, Verifier};
 
 pub type Var = isize;
 
-#[derive(Debug, Clone, Copy, Eq)]
+#[derive(Clone, Copy, Eq)]
 pub struct Lit(isize);
 
 impl Lit {
@@ -66,6 +66,12 @@ impl FromStr for Lit {
 }
 
 impl fmt::Display for Lit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Debug for Lit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
