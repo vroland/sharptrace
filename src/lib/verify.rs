@@ -1,5 +1,5 @@
 use crate::list::ModelList;
-use crate::utils::{vars_disjoint, vars_iter, vars_subset};
+use crate::utils::{vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
@@ -357,6 +357,7 @@ impl<'t> Verifier<'t> {
 
     pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
         let component = self.trace.components.get(&join.component).unwrap();
+        let assm_vars: BTreeSet<_> = vars_iter(join.assm.iter()).collect();
         let children: Vec<_> = join
             .child_components
             .iter()
@@ -366,7 +367,7 @@ impl<'t> Verifier<'t> {
         // check child component validity
         self.join_subcomponents_valid(component, &children)?;
 
-        if !vars_subset(join.assm.iter(), &component.vars) {
+        if !assm_vars.is_subset(&component.vars) {
             return Err(VerificationError::InvalidAssumptionVariables());
         }
 
@@ -378,9 +379,9 @@ impl<'t> Verifier<'t> {
                 }
 
                 let intersection_vars = child_i.vars.intersection(&child_j.vars);
-                let intersection_vars = intersection_vars.copied().collect();
+                let intersection_vars: BTreeSet<_> = intersection_vars.copied().collect();
 
-                if !vars_subset(join.assm.iter(), &intersection_vars) {
+                if !intersection_vars.is_subset(&assm_vars) {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
             }
