@@ -3,14 +3,12 @@ use crate::utils::{vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
 use varisat::{CnfFormula, ExtendFormula};
 
 #[derive(Debug)]
 pub struct Verifier<'t> {
-    // sets of assigned variables proven exhaustive for a given model list
-    implicitly_proven: HashSet<(ListIndex, BTreeSet<Var>)>,
     // sets of proven component - subcomponent combinations for join
     valid_join_subcomps: HashSet<(ComponentIndex, Vec<ComponentIndex>)>,
     trace: &'t Trace,
@@ -54,15 +52,6 @@ pub enum VerificationError {
     AssumptionNotAModel(),
 }
 
-fn is_model_of<'a>(
-    trace: &Trace,
-    model: &Model,
-    mut clauses: impl Iterator<Item = &'a ClauseIndex>,
-) -> bool {
-    // FIXME: this can be accelerated, since model and clauses are sorted
-    clauses.all(|c| trace.clauses[*c].lits.iter().any(|l| model.contains(l)))
-}
-
 fn restrict_clause<'a, 'b: 'a>(
     clause: impl Iterator<Item = &'a Lit> + 'a,
     vars: &'b BTreeSet<Var>,
@@ -80,14 +69,6 @@ fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = L
     m.map(|l| -l)
 }
 
-/// generate a mapping of variables to variable indices
-/// from a set of variables
-fn local_variable_mapping(vars: &BTreeSet<Var>) -> BTreeMap<Var, Var> {
-    let mut vec = vars.iter().copied().collect::<Vec<_>>();
-    vec.sort_unstable();
-    BTreeMap::from_iter(vec.drain(..).enumerate().map(|(i, v)| (v, i as isize + 1)))
-}
-
 fn lits_to_varisat(lits: impl IntoIterator<Item = Lit>) -> Vec<varisat::Lit> {
     lits.into_iter()
         .map(|l| l.signum() * l.var())
@@ -98,7 +79,6 @@ fn lits_to_varisat(lits: impl IntoIterator<Item = Lit>) -> Vec<varisat::Lit> {
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
-            implicitly_proven: HashSet::new(),
             valid_join_subcomps: HashSet::new(),
             trace,
         }
@@ -126,13 +106,6 @@ impl<'t> Verifier<'t> {
 
     pub fn verify_list(&self, list: ListIndex) -> Result<(), VerificationError> {
         let (mlist, comp) = self.list_matches_component(list)?;
-
-        // all models are models
-        for model in mlist.all_models() {
-            if !is_model_of(self.trace, &model, mlist.clauses.iter()) {
-                return Err(VerificationError::NotAModel(Box::new(model)));
-            }
-        }
 
         // validity condition
         let mut validation_formula = CnfFormula::new();
@@ -188,12 +161,7 @@ impl<'t> Verifier<'t> {
 
         let mut count = BigUint::zero();
         for m in mlist.find_models(&composition.assm) {
-            // find subclaim of same component, do not allow implicit claims
-            if let Some(claim) = self.trace.find_claim(comp_id, &m) {
-                count += claim.count();
-            } else {
-                return Err(VerificationError::NoSupportingClaim(Box::new(m.clone())));
-            }
+            count += self.lookup_subclaim_count(comp_id, &m)?;
         }
 
         if count != composition.count {
@@ -206,63 +174,13 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
-    fn is_implicit_claim(&mut self, component: ComponentIndex, implicit_assm: &Assumption) -> bool {
-        let comp_claims = self.trace.component_claims(component).unwrap();
-        let assm_vars = BTreeSet::from_iter(vars_iter(implicit_assm.iter()));
-
-        for (par_assm, pc) in comp_claims {
-            // early exit
-            if par_assm.len() >= implicit_assm.len() {
-                continue;
-            }
-
-            if !par_assm.is_subset(implicit_assm) {
-                continue;
-            }
-
-            if let Claim::Composition(parent) = pc {
-                let mlist = self.trace.get_list(parent.list).unwrap();
-
-                // cache hit
-                let cache_key = (parent.list, vars_iter(implicit_assm.iter()).collect());
-                if self.implicitly_proven.contains(&cache_key) {
-                    return true;
-                }
-
-                // FIXME: not sure how BTreeSet is ordered, so search all
-                let sibling_count = comp_claims
-                    .iter()
-                    .filter(|(assm, _)| assm.len() == implicit_assm.len())
-                    .filter(|(assm, _)| vars_iter(assm.iter()).all(|v| assm_vars.contains(&v)))
-                    .filter(|(_, claim)| {
-                        if let Claim::Composition(c) = claim {
-                            c.list == mlist.index
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|(_, claim)| claim.count())
-                    .fold(BigUint::zero(), |acc, c| acc + c);
-
-                // siblings complete, we can instantiate an implicit claim
-                if sibling_count == parent.count {
-                    self.implicitly_proven.insert(cache_key);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     fn lookup_subclaim_count(
-        &mut self,
+        &self,
         component: ComponentIndex,
         assm: &Assumption,
     ) -> Result<BigUint, VerificationError> {
         if let Some(claim) = self.trace.find_claim(component, assm) {
             Ok(claim.count())
-        } else if self.is_implicit_claim(component, assm) {
-            Ok(BigUint::zero())
         } else {
             Err(VerificationError::NoSupportingClaim(Box::new(assm.clone())))
         }
