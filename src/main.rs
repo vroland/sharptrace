@@ -35,19 +35,19 @@ fn main() -> Result<(), ProofError> {
 
     let mut verifier = Verifier::new(&trace);
 
-    // verify model lists
-    let list_count = trace.get_lists().count();
-    for (i, list) in trace.get_lists().enumerate() {
-        if i % (list_count / 100) == 0 {
-            eprint! {"\rverifying lists... {}%", (i * 100) / list_count};
+    // verify prefix_sets
+    let set_count = trace.get_prefix_sets().count();
+    for (i, set) in trace.get_prefix_sets().enumerate() {
+        if i % (set_count / 100) == 0 {
+            eprint! {"\rverifying prefix sets... {}%", (i * 100) / set_count};
         }
-        if let Err(e) = verifier.verify_list(*list) {
+        if let Err(e) = verifier.verify_prefixes(*set) {
             eprintln! {};
-            eprintln! {"verification error for list {}: {}", list, e}
+            eprintln! {"verification error for prefix set {}: {}", set, e}
             std::process::exit(2);
         }
     }
-    eprintln! {"\rlists verified.           "};
+    eprintln! {"\rprefix sets verified.           "};
 
     // verify claims
     let claim_count = trace.get_claims().count();

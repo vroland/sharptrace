@@ -1,4 +1,4 @@
-use crate::list::ModelList;
+use crate::prefixes::PrefixSet;
 use crate::utils::{vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
@@ -16,21 +16,17 @@ pub struct Verifier<'t> {
 
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
-    #[error("list variables are not a subset of component variables")]
-    InvalidListVariables(),
+    #[error("prefix variables are not a subset of component variables")]
+    InvalidPrefixVariables(),
     #[error("assumption variables are not a subset of component variables")]
     InvalidAssumptionVariables(),
-    #[error("list clauses are not a subset of component clauses")]
-    InvalidListClauses(),
     #[error("the assignment {0:?} is not a model")]
     NotAModel(Box<Model>),
-    #[error("clause {0} violates model list validity")]
-    InvalidModelList(ClauseIndex),
-    #[error("the model list is incomplete")]
-    IncompleteModelList(),
-    #[error("assumption of list is insufficient for the claim")]
+    #[error("prefix set {0} is invalid for component {1}")]
+    InvalidPrefixSet(PrefixSetIndex, ComponentIndex),
+    #[error("assumption of prefix set is insufficient for the claim")]
     InsufficientAssumption(),
-    #[error("no claim found for list model {0:?}")]
+    #[error("no claim found for assumption {0:?}")]
     NoSupportingClaim(Box<Model>),
     #[error("claimed count is {0}, but verified count is {1}")]
     WrongCount(BigUint, BigUint),
@@ -84,28 +80,24 @@ impl<'t> Verifier<'t> {
         }
     }
 
-    /// checks that a given list matches the associated component
-    /// variables and clauses and returns list and component.
-    fn list_matches_component(
+    /// checks that a given prefix set definition matches the associated component
+    /// returns prefix set and component.
+    fn prefix_set_matches_comp(
         &self,
-        list: ListIndex,
-    ) -> Result<(&ModelList, &Component), VerificationError> {
-        let mlist = self.trace.get_list(list).unwrap();
-        let comp = self.trace.components.get(&mlist.component).unwrap();
+        set_idx: PrefixSetIndex,
+    ) -> Result<(&PrefixSet, &Component), VerificationError> {
+        let prefixes = self.trace.get_prefixes(set_idx).unwrap();
+        let comp = self.trace.components.get(&prefixes.component).unwrap();
 
-        if !mlist.vars.is_subset(&comp.vars) {
-            return Err(VerificationError::InvalidListVariables());
+        if !prefixes.vars.is_subset(&comp.vars) {
+            return Err(VerificationError::InvalidPrefixVariables());
         }
 
-        if !mlist.clauses.is_subset(&comp.clauses) {
-            eprintln! {"{:?}", mlist.clauses.difference(&comp.clauses).collect::<Vec<_>>()};
-            return Err(VerificationError::InvalidListClauses());
-        }
-        Ok((mlist, comp))
+        Ok((prefixes, comp))
     }
 
-    pub fn verify_list(&self, list: ListIndex) -> Result<(), VerificationError> {
-        let (mlist, comp) = self.list_matches_component(list)?;
+    pub fn verify_prefixes(&self, set_idx: PrefixSetIndex) -> Result<(), VerificationError> {
+        let (prefixes, comp) = self.prefix_set_matches_comp(set_idx)?;
 
         // validity condition
         let mut validation_formula = CnfFormula::new();
@@ -117,11 +109,11 @@ impl<'t> Verifier<'t> {
             let varisat_clause = lits_to_varisat(restricted);
             validation_formula.add_clause(&varisat_clause);
         }
-        for l in &mlist.assm {
+        for l in &prefixes.assm {
             let varisat_clause = lits_to_varisat([*l]);
             validation_formula.add_clause(&varisat_clause);
         }
-        for model in mlist.all_models() {
+        for model in prefixes.all_models() {
             let negated = negate_model(model.iter().copied());
             let clause = lits_to_varisat(negated);
             validation_formula.add_clause(&clause);
@@ -141,8 +133,8 @@ impl<'t> Verifier<'t> {
                     .iter()
                     .map(|l| Lit::from_dimacs(l.to_dimacs()))
                     .collect();
-                eprintln! {"{:?}", restrict_clause(lits.iter(), &mlist.vars).collect::<Vec<_>>()};
-                return Err(VerificationError::InvalidModelList(0));
+                eprintln! {"{:?}", restrict_clause(lits.iter(), &prefixes.vars).collect::<Vec<_>>()};
+                return Err(VerificationError::InvalidPrefixSet(set_idx, comp.index));
             }
             Err(e) => panic! {"sat solver error {:?}", e},
         }
@@ -152,15 +144,15 @@ impl<'t> Verifier<'t> {
         &mut self,
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let (mlist, comp) = self.list_matches_component(composition.list)?;
+        let (prefixes, comp) = self.prefix_set_matches_comp(composition.prefixes)?;
         let comp_id = comp.index;
 
-        if !mlist.assm.is_subset(&composition.assm) {
+        if !prefixes.assm.is_subset(&composition.assm) {
             return Err(VerificationError::InsufficientAssumption());
         }
 
         let mut count = BigUint::zero();
-        for m in mlist.find_models(&composition.assm) {
+        for m in prefixes.find_models(&composition.assm) {
             count += self.lookup_subclaim_count(comp_id, &m)?;
         }
 

@@ -1,4 +1,4 @@
-use crate::list::ModelList;
+use crate::prefixes::PrefixSet;
 use crate::*;
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
@@ -29,15 +29,14 @@ pub enum TraceLine {
         vars: Vec<Var>,
         clauses: Vec<ClauseIndex>,
     },
-    ModelList {
-        index: ListIndex,
+    PrefixSetDef {
+        index: PrefixSetIndex,
         component: ComponentIndex,
         vars: Vec<Var>,
-        clauses: Vec<ClauseIndex>,
         assm: Vec<Lit>,
     },
     Model {
-        list: ListIndex,
+        set_idx: PrefixSetIndex,
         lits: Vec<Lit>,
     },
     ModelClaim {
@@ -45,11 +44,11 @@ pub enum TraceLine {
         model: Vec<Lit>,
     },
     CompositionClaim {
-        list: ListIndex,
+        prefixes: PrefixSetIndex,
         count: BigUint,
         assm: Vec<Lit>,
     },
-    JoinList {
+    JoinChild {
         child: ComponentIndex,
         component: ComponentIndex,
     },
@@ -78,26 +77,26 @@ pub enum IntegrityError {
     ListInconsistent(),
     #[error("the component id {0} is not unique")]
     DuplicateComponentId(ComponentIndex),
-    #[error("the model list id {0} is not unique")]
-    DuplicateListId(ListIndex),
+    #[error("prefix set id {0} is not unique")]
+    DuplicateSetId(PrefixSetIndex),
     #[error("a claim with the same assumption already exists for component {0}")]
     DuplicateClaim(ComponentIndex),
     #[error("component {0} this claim references is not (yet) defined")]
     MissingComponentDef(ComponentIndex),
-    #[error("model list {0} this claim references is not (yet) defined")]
-    MissingModelList(ListIndex),
-    #[error("a claim for component {0} was given before all join lists where specified")]
-    ClaimBeforeJoinList(ComponentIndex),
-    #[error("the join list component {0} is redundant for component {1}")]
-    RedundantJoinList(ComponentIndex, ComponentIndex),
+    #[error("the prefix set {0} this claim references is not (yet) defined")]
+    MissingPrefixSet(PrefixSetIndex),
+    #[error("a claim for component {0} was given before all join children where specified")]
+    ClaimBeforeJoinChild(ComponentIndex),
+    #[error("the join child {0} is redundant for component {1}")]
+    RedundantJoinChild(ComponentIndex, ComponentIndex),
     #[error("a misplaced problem line within the trace")]
     UnexpectedProblemLine(),
     #[error("a misplaced clause line within the trace")]
     UnexpectedClause(),
-    #[error("model is not an assignment over the list variables of model list {0:?}")]
+    #[error("model {0:?} is not an assignment over the prefix variables")]
     InvalidModel(Box<Model>),
-    #[error("the model was already given for model list {0}")]
-    DuplicateModel(ListIndex),
+    #[error("the model was already given in the prefix set {0}")]
+    DuplicateModel(PrefixSetIndex),
     #[error("next clause sequence number is {0} but should be {1}")]
     InvalidIntroducedClauseIndex(ClauseIndex, ClauseIndex),
     #[error("no root claim was specified")]
@@ -193,24 +192,23 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "ml" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
-                [[idx, comp, v @ ..], [c @ ..], [a @ ..], []] => Ok(TraceLine::ModelList {
+            "ps" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
+                [[idx, comp, v @ ..], [a @ ..], []] => Ok(TraceLine::PrefixSetDef {
                     index: LineParser::parsenum(idx)?,
                     component: LineParser::parsenum(comp)?,
                     vars: LineParser::parsevec(v)?,
-                    clauses: LineParser::parsevec(c)?,
                     assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "m" => match data {
+            "pa" => match data {
                 [idx, l @ .., "0"] => Ok(TraceLine::Model {
-                    list: LineParser::parsenum(idx)?,
+                    set_idx: LineParser::parsenum(idx)?,
                     lits: LineParser::parselits(l)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "l" => match data {
+            "m" => match data {
                 [comp, "1", a @ .., "0"] => Ok(TraceLine::ModelClaim {
                     component: LineParser::parsenum(comp)?,
                     model: LineParser::parselits(a)?,
@@ -218,16 +216,16 @@ impl LineParser {
                 _ => Err(ParseError::MalformedLine()),
             },
             "a" => match data {
-                [list, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
-                    list: LineParser::parsenum(list)?,
+                [prefixes, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
+                    prefixes: LineParser::parsenum(prefixes)?,
                     count: LineParser::parsenum(count)?,
                     assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "jl" => match data {
-                [list, comp, "0"] => Ok(TraceLine::JoinList {
-                    child: LineParser::parsenum(list)?,
+            "jc" => match data {
+                [child, comp, "0"] => Ok(TraceLine::JoinChild {
+                    child: LineParser::parsenum(child)?,
                     component: LineParser::parsenum(comp)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
@@ -282,7 +280,7 @@ impl Iterator for LineParser {
 pub struct BodyParser {
     trace: Trace,
     lp: LineParser,
-    join_lists: BTreeMap<ComponentIndex, Vec<ComponentIndex>>,
+    join_children: BTreeMap<ComponentIndex, Vec<ComponentIndex>>,
 }
 
 // FIXME: eventually, this should work in a streaming fashion
@@ -344,25 +342,25 @@ impl BodyParser {
                     return Err((ln, IntegrityError::DuplicateComponentId(index)));
                 }
             }
-            TraceLine::ModelList {
+            TraceLine::PrefixSetDef {
                 index,
                 component,
                 vars,
-                clauses,
                 assm,
             } => self
                 .trace
-                .insert_list(ModelList::new(
+                .insert_prefixes(PrefixSet::new(
                     index,
                     component,
                     self.checked_varset(vars).map_err(|e| (ln, e))?,
-                    self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
                     self.checked_litset(assm).map_err(|e| (ln, e))?,
                 ))
                 .map_err(|e| (ln, e))?,
-            TraceLine::Model { list, lits } => {
+            TraceLine::Model { set_idx, lits } => {
                 let model = self.checked_litset(lits).map_err(|e| (ln, e))?;
-                self.trace.insert_model(list, model).map_err(|e| (ln, e))?
+                self.trace
+                    .insert_model(set_idx, model)
+                    .map_err(|e| (ln, e))?
             }
             TraceLine::ModelClaim { component, model } => self
                 .trace
@@ -371,15 +369,19 @@ impl BodyParser {
                     model: self.checked_litset(model).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
-            TraceLine::CompositionClaim { list, count, assm } => self
+            TraceLine::CompositionClaim {
+                prefixes,
+                count,
+                assm,
+            } => self
                 .trace
                 .insert_composition_claim(CompositionClaim {
-                    list,
+                    prefixes,
                     count,
                     assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
-            TraceLine::JoinList { child, component } => {
+            TraceLine::JoinChild { child, component } => {
                 if !self.trace.components.contains_key(&child) {
                     return Err((ln, IntegrityError::MissingComponentDef(child)));
                 };
@@ -387,22 +389,22 @@ impl BodyParser {
                     return Err((ln, IntegrityError::MissingComponentDef(component)));
                 };
                 if self.trace.has_join_claims(component) {
-                    return Err((ln, IntegrityError::ClaimBeforeJoinList(component)));
+                    return Err((ln, IntegrityError::ClaimBeforeJoinChild(component)));
                 }
-                let lists = match self.join_lists.get_mut(&component) {
+                let children = match self.join_children.get_mut(&component) {
                     Some(l) => l,
                     None => {
-                        self.join_lists.insert(component, Vec::new());
-                        self.join_lists.get_mut(&component).unwrap()
+                        self.join_children.insert(component, Vec::new());
+                        self.join_children.get_mut(&component).unwrap()
                     }
                 };
-                if lists
+                if children
                     .iter()
-                    .any(|l| self.trace.get_list(*l).unwrap().component == component)
+                    .any(|l| self.trace.get_prefixes(*l).unwrap().component == component)
                 {
-                    return Err((ln, IntegrityError::RedundantJoinList(child, component)));
+                    return Err((ln, IntegrityError::RedundantJoinChild(child, component)));
                 }
-                lists.push(child);
+                children.push(child);
             }
             TraceLine::JoinClaim {
                 component,
@@ -414,9 +416,9 @@ impl BodyParser {
                     component,
                     count,
                     assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
-                    child_components: match self.join_lists.get(&component) {
+                    child_components: match self.join_children.get(&component) {
                         Some(l) => l.clone(),
-                        None => return Err((ln, IntegrityError::ClaimBeforeJoinList(component))),
+                        None => return Err((ln, IntegrityError::ClaimBeforeJoinChild(component))),
                     },
                 })
                 .map_err(|e| (ln, e))?,
@@ -520,7 +522,7 @@ impl HeaderParser {
         Ok(BodyParser {
             trace: problem,
             lp: self.lp,
-            join_lists: BTreeMap::new(),
+            join_children: BTreeMap::new(),
         })
     }
 }

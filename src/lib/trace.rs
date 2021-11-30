@@ -1,6 +1,8 @@
-use crate::list::*;
+use crate::prefixes::*;
 use crate::utils::vars_iter;
-use crate::{Assumption, ClauseIndex, ComponentIndex, IntegrityError, ListIndex, Lit, Model, Var};
+use crate::{
+    Assumption, ClauseIndex, ComponentIndex, IntegrityError, Lit, Model, PrefixSetIndex, Var,
+};
 use num_bigint::BigUint;
 use num_traits::identities::One;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -27,7 +29,7 @@ pub struct ModelClaim {
 
 #[derive(Debug, Clone)]
 pub struct CompositionClaim {
-    pub list: ListIndex,
+    pub prefixes: PrefixSetIndex,
     pub count: BigUint,
     pub assm: Assumption,
 }
@@ -86,7 +88,7 @@ impl Claim {
     pub fn component(&self) -> ComponentIndex {
         match self {
             Claim::Model(claim) => claim.component,
-            Claim::Composition(claim) => claim.list,
+            Claim::Composition(claim) => claim.prefixes,
             Claim::Join(claim) => claim.component,
             Claim::Extension(claim) => claim.component,
         }
@@ -97,7 +99,7 @@ impl fmt::Display for Claim {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{} claim: {} models for component/list {} under {:?}",
+            "{} claim: {} models for component/prefix set {} under {:?}",
             self.tag(),
             self.count(),
             self.component(),
@@ -112,7 +114,7 @@ pub struct Trace {
     pub n_orig_clauses: usize,
     pub clauses: Vec<Clause>,
     pub components: BTreeMap<ComponentIndex, Component>,
-    lists: BTreeMap<ListIndex, ModelList>,
+    prefix_sets: BTreeMap<PrefixSetIndex, PrefixSet>,
     claims: HashMap<ComponentIndex, BTreeMap<Assumption, Claim>>,
 }
 
@@ -133,45 +135,49 @@ impl Trace {
             n_orig_clauses: clauses,
             clauses: Vec::new(),
             components: BTreeMap::new(),
-            lists: BTreeMap::new(),
+            prefix_sets: BTreeMap::new(),
             claims: HashMap::new(),
         }
     }
 
-    /// Insert a model list.
-    pub fn insert_list(&mut self, list: ModelList) -> Result<(), IntegrityError> {
-        if !self.components.contains_key(&list.component) {
-            return Err(IntegrityError::MissingComponentDef(list.component));
+    /// Insert a prefix set.
+    pub fn insert_prefixes(&mut self, set: PrefixSet) -> Result<(), IntegrityError> {
+        if !self.components.contains_key(&set.component) {
+            return Err(IntegrityError::MissingComponentDef(set.component));
         }
-        let list_index = list.index;
-        if self.lists.insert(list_index, list).is_some() {
-            return Err(IntegrityError::DuplicateListId(list_index));
+        let set_index = set.index;
+        if self.prefix_sets.insert(set_index, set).is_some() {
+            return Err(IntegrityError::DuplicateSetId(set_index));
         }
         Ok(())
     }
 
-    pub fn insert_model(&mut self, list: ListIndex, model: Model) -> Result<(), IntegrityError> {
-        let mlist = match self.lists.get_mut(&list) {
+    pub fn insert_model(
+        &mut self,
+        set: PrefixSetIndex,
+        model: Model,
+    ) -> Result<(), IntegrityError> {
+        let pset = match self.prefix_sets.get_mut(&set) {
             Some(l) => l,
-            None => return Err(IntegrityError::MissingModelList(list)),
+            None => return Err(IntegrityError::MissingPrefixSet(set)),
         };
         let model_vars = BTreeSet::from_iter(vars_iter(model.iter()));
-        if model_vars != mlist.vars {
-            eprintln! {"model vars: {:?} list vars: {:?}", model_vars, mlist.vars};
+        if model_vars != pset.vars {
+            eprintln! {"assumption vars: {:?} prefix vars: {:?}", model_vars, pset.vars};
             return Err(IntegrityError::InvalidModel(Box::new(model)));
         }
-        if !mlist.insert(model) {
-            return Err(IntegrityError::DuplicateModel(list));
+        if !pset.insert(model) {
+            return Err(IntegrityError::DuplicateModel(set));
         }
         Ok(())
     }
 
-    pub fn get_list(&self, list: ListIndex) -> Option<&ModelList> {
-        self.lists.get(&list)
+    pub fn get_prefixes(&self, set: PrefixSetIndex) -> Option<&PrefixSet> {
+        self.prefix_sets.get(&set)
     }
 
-    pub fn get_lists(&self) -> impl Iterator<Item = &ListIndex> {
-        self.lists.keys()
+    pub fn get_prefix_sets(&self) -> impl Iterator<Item = &PrefixSetIndex> {
+        self.prefix_sets.keys()
     }
 
     pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
@@ -224,9 +230,9 @@ impl Trace {
         &mut self,
         claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
-        let comp_id = match self.lists.get(&claim.list) {
+        let comp_id = match self.prefix_sets.get(&claim.prefixes) {
             Some(l) => l.component,
-            None => return Err(IntegrityError::MissingModelList(claim.list)),
+            None => return Err(IntegrityError::MissingPrefixSet(claim.prefixes)),
         };
         self.insert_claim_unchecked(comp_id, claim.assm.clone(), Claim::Composition(claim))
     }
@@ -253,7 +259,7 @@ impl Trace {
         eprintln! {"clauses: {}", self.n_orig_clauses};
         eprintln! {"variables: {}", self.n_vars};
         eprintln! {"components: {}", self.components.len()};
-        eprintln! {"model lists: {} with {} models in total", self.lists.len(), self.lists.values().fold(0, |acc, l| acc + l.len())};
+        eprintln! {"prefix sets: {} with {} models in total", self.prefix_sets.len(), self.prefix_sets.values().fold(0, |acc, l| acc + l.len())};
         eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
 

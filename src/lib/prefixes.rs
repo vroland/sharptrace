@@ -1,30 +1,26 @@
-use crate::utils::vars_iter;
 use crate::*;
 
-/// Model list data stricture allowing for efficient model search.
+/// Prefix set data stricture allowing for efficient model search.
 #[derive(Debug, Clone)]
-pub struct ModelList {
-    pub index: ListIndex,
+pub struct PrefixSet {
+    pub index: PrefixSetIndex,
     pub component: ComponentIndex,
     pub vars: BTreeSet<Var>,
-    pub clauses: BTreeSet<ClauseIndex>,
     pub assm: Assumption,
     models: BTreeSet<u64>,
 }
 
-impl ModelList {
+impl PrefixSet {
     pub fn new(
-        index: ListIndex,
+        index: PrefixSetIndex,
         component: ComponentIndex,
         vars: BTreeSet<Var>,
-        clauses: BTreeSet<ClauseIndex>,
         assm: Assumption,
     ) -> Self {
-        ModelList {
+        PrefixSet {
             index,
             component,
             vars,
-            clauses,
             assm,
             models: BTreeSet::new(),
         }

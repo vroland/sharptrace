@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-mod list;
 mod parse;
+mod prefixes;
 mod trace;
 mod utils;
 mod verify;
@@ -81,7 +81,7 @@ impl fmt::Debug for Lit {
 pub type ClauseIndex = usize;
 /// A component index.
 pub type ComponentIndex = usize;
-/// A model list index.
-pub type ListIndex = usize;
+/// A prefix set index.
+pub type PrefixSetIndex = usize;
 pub type Model = BTreeSet<Lit>;
 pub type Assumption = BTreeSet<Lit>;
