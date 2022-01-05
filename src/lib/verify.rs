@@ -64,6 +64,12 @@ fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = L
     m.map(|l| -l)
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BcpResult {
+    Success,
+    Conflict,
+}
+
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
@@ -121,8 +127,60 @@ impl<'t> Verifier<'t> {
             formula.push(negated.collect());
         }
 
-        // FIXME: verify
+        // the final empty clause step
+        let final_step = [vec![]];
+
+        for step in proof.steps.iter().chain(final_step.iter()) {
+            if !Self::is_rup_inference(&formula, &step) {
+                //eprintln! {"step failed: {:?}", step};
+                continue;
+            }
+            formula.push(step.clone());
+        }
+
+        // was the empty clause accepted?
+        if formula.last() != Some(&vec![]) {
+            return Err(VerificationError::InvalidExhaustivenessProof(
+                proof.index,
+                comp.index,
+            ));
+        }
         Ok(())
+    }
+
+    fn unit_propagate(clauses: &mut Vec<Vec<Lit>>) -> BcpResult {
+        loop {
+            if clauses.is_empty() {
+                return BcpResult::Success;
+            }
+
+            let (unit, cli) = match clauses.iter().enumerate().find(|c| c.1.len() == 1) {
+                Some((idx, u)) => (u[0], idx),
+                None => return BcpResult::Success,
+            };
+
+            for cl in clauses.iter_mut() {
+                if cl.contains(&-unit) {
+                    cl.retain(|l| *l != -unit);
+                    if cl.len() == 0 {
+                        return BcpResult::Conflict;
+                    }
+                }
+            }
+
+            // remove the propagated unit clause
+            let last = clauses.len() - 1;
+            clauses.swap(cli, last);
+            clauses.pop();
+        }
+    }
+
+    fn is_rup_inference(clauses: &Vec<Vec<Lit>>, clause: &Vec<Lit>) -> bool {
+        let mut pre = clauses.clone();
+        for unit in negate_model(clause.iter().copied()) {
+            pre.push(vec![unit]);
+        }
+        Self::unit_propagate(&mut pre) == BcpResult::Conflict
     }
 
     pub fn verify_composition(

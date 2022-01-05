@@ -5,7 +5,7 @@ use crate::*;
 pub struct ExhaustivenessProof {
     pub index: ProofIndex,
     pub component: ComponentIndex,
-    steps: Vec<Vec<Lit>>,
+    pub steps: Vec<Vec<Lit>>,
     // pairs of assumptions and prefix
     // variables this proof is claimed to be exhaustive for
     pub claimed_exhaustive_for: Vec<(Assumption, BTreeSet<Var>)>,
