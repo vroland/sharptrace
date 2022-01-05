@@ -1,11 +1,10 @@
-use crate::prefixes::PrefixSet;
+use crate::proofs::ExhaustivenessProof;
 use crate::utils::{vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
 use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
-use varisat::{CnfFormula, ExtendFormula};
 
 #[derive(Debug)]
 pub struct Verifier<'t> {
@@ -16,18 +15,16 @@ pub struct Verifier<'t> {
 
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
-    #[error("prefix variables are not a subset of component variables")]
-    InvalidPrefixVariables(),
+    #[error("the exhaustiveness proof {0} is not applicable for the claim with assm {1:?}")]
+    NoApplicableProof(ProofIndex, Box<Assumption>),
     #[error("assumption variables are not a subset of component variables")]
     InvalidAssumptionVariables(),
     #[error("the assignment {0:?} is not a model")]
-    NotAModel(Box<Model>),
-    #[error("prefix set {0} is invalid for component {1}")]
-    InvalidPrefixSet(PrefixSetIndex, ComponentIndex),
-    #[error("assumption of prefix set is insufficient for the claim")]
+    NotAModel(Box<Assumption>),
+    #[error("exhaustiveness proof {0} is invalid for component {1}")]
+    InvalidExhaustivenessProof(ProofIndex, ComponentIndex),
+    #[error("assumption of proof is insufficient for the claim")]
     InsufficientAssumption(),
-    #[error("no claim found for assumption {0:?}")]
-    NoSupportingClaim(Box<Model>),
     #[error("claimed count is {0}, but verified count is {1}")]
     WrongCount(BigUint, BigUint),
     #[error("child component variables are not a subset of parent variables")]
@@ -46,6 +43,8 @@ pub enum VerificationError {
     IllegalExtensionClause(ClauseIndex, ComponentIndex),
     #[error("the assumption of this model claim is not a model")]
     AssumptionNotAModel(),
+    #[error("no claim found for assumption {0:?}")]
+    NoSupportingClaim(Box<Assumption>),
 }
 
 fn restrict_clause<'a, 'b: 'a>(
@@ -65,13 +64,6 @@ fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = L
     m.map(|l| -l)
 }
 
-fn lits_to_varisat(lits: impl IntoIterator<Item = Lit>) -> Vec<varisat::Lit> {
-    lits.into_iter()
-        .map(|l| l.signum() * l.var())
-        .map(varisat::Lit::from_dimacs)
-        .collect::<Vec<_>>()
-}
-
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
@@ -80,80 +72,75 @@ impl<'t> Verifier<'t> {
         }
     }
 
-    /// checks that a given prefix set definition matches the associated component
-    /// returns prefix set and component.
-    fn prefix_set_matches_comp(
+    /// checks that a given proof matches the claim
+    /// returns proof and chosed exhaustiveness statement.
+    fn proof_for_claim(
         &self,
-        set_idx: PrefixSetIndex,
-    ) -> Result<(&PrefixSet, &Component), VerificationError> {
-        let prefixes = self.trace.get_prefixes(set_idx).unwrap();
-        let comp = self.trace.components.get(&prefixes.component).unwrap();
+        claim: &CompositionClaim,
+    ) -> Result<(&ExhaustivenessProof, &(Assumption, BTreeSet<Var>)), VerificationError> {
+        let proof = self.trace.get_proof(claim.proof).unwrap();
+        let comp = self.trace.components.get(&proof.component).unwrap();
 
-        if !prefixes.vars.is_subset(&comp.vars) {
-            return Err(VerificationError::InvalidPrefixVariables());
+        for stmt in &proof.claimed_exhaustive_for {
+            if stmt.1.is_subset(&comp.vars) && stmt.0 == claim.assm {
+                return Ok((proof, stmt));
+            }
         }
-
-        Ok((prefixes, comp))
+        Err(VerificationError::NoApplicableProof(
+            claim.proof,
+            Box::new(claim.assm.clone()),
+        ))
     }
 
-    pub fn verify_prefixes(&self, set_idx: PrefixSetIndex) -> Result<(), VerificationError> {
-        let (prefixes, comp) = self.prefix_set_matches_comp(set_idx)?;
+    pub fn verify_exhaustiveness(
+        &self,
+        proof: &ExhaustivenessProof,
+        assm: &Assumption,
+        pvars: &BTreeSet<Var>,
+    ) -> Result<(), VerificationError> {
+        let comp = self.trace.components.get(&proof.component).unwrap();
 
-        // validity condition
-        let mut validation_formula = CnfFormula::new();
-        validation_formula.set_var_count(self.trace.n_vars);
+        let mut formula = vec![];
 
+        // exhaustiveness formula - assumption
+        for lit in assm {
+            formula.push(vec![*lit]);
+        }
+
+        // exhaustiveness formula - component clauses
         for cl in &comp.clauses {
             let lits = &self.trace.clauses[*cl].lits;
             let restricted = restrict_clause(lits.iter(), &comp.vars);
-            let varisat_clause = lits_to_varisat(restricted);
-            validation_formula.add_clause(&varisat_clause);
-        }
-        for l in &prefixes.assm {
-            let varisat_clause = lits_to_varisat([*l]);
-            validation_formula.add_clause(&varisat_clause);
-        }
-        for model in prefixes.all_models() {
-            let negated = negate_model(model.iter().copied());
-            let clause = lits_to_varisat(negated);
-            validation_formula.add_clause(&clause);
+            formula.push(restricted.collect());
         }
 
-        let mut solver = varisat::Solver::new();
-        solver.add_formula(&validation_formula);
+        let claims = self.trace.find_claims(comp.index, pvars.clone()).unwrap();
 
-        match solver.solve() {
-            // clause is implied
-            Ok(false) => Ok(()),
-            // clause is not implied
-            Ok(true) => {
-                let lits: Vec<_> = solver
-                    .model()
-                    .unwrap()
-                    .iter()
-                    .map(|l| Lit::from_dimacs(l.to_dimacs()))
-                    .collect();
-                eprintln! {"{:?}", restrict_clause(lits.iter(), &prefixes.vars).collect::<Vec<_>>()};
-                return Err(VerificationError::InvalidPrefixSet(set_idx, comp.index));
-            }
-            Err(e) => panic! {"sat solver error {:?}", e},
+        for claim in claims {
+            let negated = negate_model(claim.assumption().iter().copied());
+            formula.push(negated.collect());
         }
+
+        // FIXME: verify
+        Ok(())
     }
 
     pub fn verify_composition(
         &mut self,
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let (prefixes, comp) = self.prefix_set_matches_comp(composition.prefixes)?;
-        let comp_id = comp.index;
+        let (proof, (assm, vars)) = self.proof_for_claim(composition)?;
 
-        if !prefixes.assm.is_subset(&composition.assm) {
-            return Err(VerificationError::InsufficientAssumption());
-        }
+        self.verify_exhaustiveness(proof, assm, vars)?;
 
         let mut count = BigUint::zero();
-        for m in prefixes.find_models(&composition.assm) {
-            count += self.lookup_subclaim_count(comp_id, &m)?;
+        for claim in self
+            .trace
+            .find_claims(proof.component, vars.clone())
+            .unwrap()
+            .filter(|claim| claim.assumption().is_superset(&composition.assm))
+        {
+            count += claim.count()
         }
 
         if count != composition.count {
@@ -320,13 +307,13 @@ impl<'t> Verifier<'t> {
 
     pub fn verify_model_claim(&mut self, mc: &ModelClaim) -> Result<(), VerificationError> {
         let comp = self.trace.components.get(&mc.component).unwrap();
-        let mc_vars = vars_iter(mc.model.iter()).collect();
+        let mc_vars = vars_iter(mc.assm.iter()).collect();
         if comp.vars != mc_vars {
             return Err(VerificationError::InvalidAssumptionVariables());
         }
         for cl in &comp.clauses {
             if !mc
-                .model
+                .assm
                 .iter()
                 .any(|l| self.trace.clauses[*cl].lits.contains(l))
             {

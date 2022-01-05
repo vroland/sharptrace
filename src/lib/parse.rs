@@ -1,7 +1,7 @@
-use crate::prefixes::PrefixSet;
+use crate::proofs::ExhaustivenessProof;
 use crate::*;
 use num_bigint::BigUint;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Lines};
@@ -20,31 +20,30 @@ pub enum TraceLine {
         index: ClauseIndex,
         lits: Vec<Lit>,
     },
-    IntroducedClause {
-        index: ClauseIndex,
-        lits: Vec<Lit>,
-    },
     ComponentDef {
         index: ComponentIndex,
         vars: Vec<Var>,
         clauses: Vec<ClauseIndex>,
     },
-    PrefixSetDef {
-        index: PrefixSetIndex,
+    ExhaustivenessDef {
+        index: ProofIndex,
         component: ComponentIndex,
+    },
+    ExhaustivenessStep {
+        proof: ProofIndex,
+        lits: Vec<Lit>,
+    },
+    ExhaustivenessStatement {
+        proof: ProofIndex,
         vars: Vec<Var>,
         assm: Vec<Lit>,
-    },
-    Model {
-        set_idx: PrefixSetIndex,
-        lits: Vec<Lit>,
     },
     ModelClaim {
         component: ComponentIndex,
         model: Vec<Lit>,
     },
     CompositionClaim {
-        prefixes: PrefixSetIndex,
+        proof: ProofIndex,
         count: BigUint,
         assm: Vec<Lit>,
     },
@@ -77,14 +76,14 @@ pub enum IntegrityError {
     ListInconsistent(),
     #[error("the component id {0} is not unique")]
     DuplicateComponentId(ComponentIndex),
-    #[error("prefix set id {0} is not unique")]
-    DuplicateSetId(PrefixSetIndex),
+    #[error("proof id {0} is not unique")]
+    DuplicateProofId(ProofIndex),
     #[error("a claim with the same assumption already exists for component {0}")]
     DuplicateClaim(ComponentIndex),
     #[error("component {0} this claim references is not (yet) defined")]
     MissingComponentDef(ComponentIndex),
-    #[error("the prefix set {0} this claim references is not (yet) defined")]
-    MissingPrefixSet(PrefixSetIndex),
+    #[error("the proof {0} this claim references is not (yet) defined")]
+    MissingExhaustivenessProof(ProofIndex),
     #[error("a claim for component {0} was given before all join children where specified")]
     ClaimBeforeJoinChild(ComponentIndex),
     #[error("the join child {0} is redundant for component {1}")]
@@ -93,12 +92,6 @@ pub enum IntegrityError {
     UnexpectedProblemLine(),
     #[error("a misplaced clause line within the trace")]
     UnexpectedClause(),
-    #[error("model {0:?} is not an assignment over the prefix variables")]
-    InvalidModel(Box<Model>),
-    #[error("the model was already given in the prefix set {0}")]
-    DuplicateModel(PrefixSetIndex),
-    #[error("next clause sequence number is {0} but should be {1}")]
-    InvalidIntroducedClauseIndex(ClauseIndex, ClauseIndex),
     #[error("no root claim was specified")]
     NoRootClaim(),
 }
@@ -177,13 +170,6 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "n" => match data {
-                [idx, l @ .., "0"] => Ok(TraceLine::IntroducedClause {
-                    index: LineParser::parsenum(idx)?,
-                    lits: LineParser::parselits(l)?,
-                }),
-                _ => Err(ParseError::MalformedLine()),
-            },
             "d" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
                 [[idx, v @ ..], [c @ ..], []] => Ok(TraceLine::ComponentDef {
                     index: LineParser::parsenum(idx)?,
@@ -192,18 +178,24 @@ impl LineParser {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "ps" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
-                [[idx, comp, v @ ..], [a @ ..], []] => Ok(TraceLine::PrefixSetDef {
+            "xp" => match data {
+                [idx, comp, "0"] => Ok(TraceLine::ExhaustivenessDef {
                     index: LineParser::parsenum(idx)?,
                     component: LineParser::parsenum(comp)?,
+                }),
+                _ => Err(ParseError::MalformedLine()),
+            },
+            "xf" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
+                [[idx, v @ ..], [a @ ..], []] => Ok(TraceLine::ExhaustivenessStatement {
+                    proof: LineParser::parsenum(idx)?,
                     vars: LineParser::parsevec(v)?,
                     assm: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "pa" => match data {
-                [idx, l @ .., "0"] => Ok(TraceLine::Model {
-                    set_idx: LineParser::parsenum(idx)?,
+            "xs" => match data {
+                [idx, l @ .., "0"] => Ok(TraceLine::ExhaustivenessStep {
+                    proof: LineParser::parsenum(idx)?,
                     lits: LineParser::parselits(l)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
@@ -216,8 +208,8 @@ impl LineParser {
                 _ => Err(ParseError::MalformedLine()),
             },
             "a" => match data {
-                [prefixes, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
-                    prefixes: LineParser::parsenum(prefixes)?,
+                [proof, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
+                    proof: LineParser::parsenum(proof)?,
                     count: LineParser::parsenum(count)?,
                     assm: LineParser::parselits(a)?,
                 }),
@@ -280,7 +272,7 @@ impl Iterator for LineParser {
 pub struct BodyParser {
     trace: Trace,
     lp: LineParser,
-    join_children: BTreeMap<ComponentIndex, Vec<ComponentIndex>>,
+    join_children: HashMap<ComponentIndex, Vec<ComponentIndex>>,
 }
 
 // FIXME: eventually, this should work in a streaming fashion
@@ -342,41 +334,32 @@ impl BodyParser {
                     return Err((ln, IntegrityError::DuplicateComponentId(index)));
                 }
             }
-            TraceLine::PrefixSetDef {
-                index,
-                component,
-                vars,
-                assm,
-            } => self
+            TraceLine::ExhaustivenessDef { index, component } => self
                 .trace
-                .insert_prefixes(PrefixSet::new(
-                    index,
-                    component,
-                    self.checked_varset(vars).map_err(|e| (ln, e))?,
-                    self.checked_litset(assm).map_err(|e| (ln, e))?,
-                ))
+                .add_proof(ExhaustivenessProof::new(index, component))
                 .map_err(|e| (ln, e))?,
-            TraceLine::Model { set_idx, lits } => {
-                let model = self.checked_litset(lits).map_err(|e| (ln, e))?;
+            TraceLine::ExhaustivenessStep { proof, lits } => self
+                .trace
+                .add_proof_step(proof, lits)
+                .map_err(|e| (ln, e))?,
+            TraceLine::ExhaustivenessStatement { proof, assm, vars } => {
+                let assm = self.checked_litset(assm).map_err(|e| (ln, e))?;
+                let vars = self.checked_varset(vars).map_err(|e| (ln, e))?;
                 self.trace
-                    .insert_model(set_idx, model)
+                    .add_exhaustiveness_for(proof, assm, vars)
                     .map_err(|e| (ln, e))?
             }
             TraceLine::ModelClaim { component, model } => self
                 .trace
                 .insert_model_claim(ModelClaim {
                     component,
-                    model: self.checked_litset(model).map_err(|e| (ln, e))?,
+                    assm: self.checked_litset(model).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
-            TraceLine::CompositionClaim {
-                prefixes,
-                count,
-                assm,
-            } => self
+            TraceLine::CompositionClaim { proof, count, assm } => self
                 .trace
                 .insert_composition_claim(CompositionClaim {
-                    prefixes,
+                    proof,
                     count,
                     assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                 })
@@ -398,12 +381,6 @@ impl BodyParser {
                         self.join_children.get_mut(&component).unwrap()
                     }
                 };
-                if children
-                    .iter()
-                    .any(|l| self.trace.get_prefixes(*l).unwrap().component == component)
-                {
-                    return Err((ln, IntegrityError::RedundantJoinChild(child, component)));
-                }
                 children.push(child);
             }
             TraceLine::JoinClaim {
@@ -416,8 +393,8 @@ impl BodyParser {
                     component,
                     count,
                     assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
-                    child_components: match self.join_children.get(&component) {
-                        Some(l) => l.clone(),
+                    child_components: match self.join_children.remove(&component) {
+                        Some(l) => l,
                         None => return Err((ln, IntegrityError::ClaimBeforeJoinChild(component))),
                     },
                 })
@@ -436,20 +413,6 @@ impl BodyParser {
                     assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
-
-            TraceLine::IntroducedClause { index, mut lits } => {
-                if index != self.trace.clauses.len() {
-                    return Err((
-                        ln,
-                        IntegrityError::InvalidIntroducedClauseIndex(
-                            index,
-                            self.trace.clauses.len(),
-                        ),
-                    ));
-                }
-                let lits = BTreeSet::from_iter(lits.drain(..));
-                self.trace.clauses.push(Clause { index, lits });
-            }
             TraceLine::Problem { .. } => return Err((ln, IntegrityError::UnexpectedProblemLine())),
             TraceLine::Clause { .. } => return Err((ln, IntegrityError::UnexpectedClause())),
         }
@@ -522,7 +485,7 @@ impl HeaderParser {
         Ok(BodyParser {
             trace: problem,
             lp: self.lp,
-            join_children: BTreeMap::new(),
+            join_children: HashMap::new(),
         })
     }
 }

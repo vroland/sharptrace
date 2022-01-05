@@ -1,11 +1,9 @@
-use crate::prefixes::*;
+use crate::proofs::ExhaustivenessProof;
 use crate::utils::vars_iter;
-use crate::{
-    Assumption, ClauseIndex, ComponentIndex, IntegrityError, Lit, Model, PrefixSetIndex, Var,
-};
+use crate::{Assumption, ClauseIndex, ComponentIndex, IntegrityError, Lit, ProofIndex, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -24,12 +22,12 @@ pub struct Component {
 #[derive(Debug, Clone)]
 pub struct ModelClaim {
     pub component: ComponentIndex,
-    pub model: Model,
+    pub assm: Assumption,
 }
 
 #[derive(Debug, Clone)]
 pub struct CompositionClaim {
-    pub prefixes: PrefixSetIndex,
+    pub proof: ProofIndex,
     pub count: BigUint,
     pub assm: Assumption,
 }
@@ -78,19 +76,10 @@ impl Claim {
 
     pub fn assumption(&self) -> &Assumption {
         match self {
-            Claim::Model(claim) => &claim.model,
+            Claim::Model(claim) => &claim.assm,
             Claim::Composition(claim) => &claim.assm,
             Claim::Join(claim) => &claim.assm,
             Claim::Extension(claim) => &claim.assm,
-        }
-    }
-
-    pub fn component(&self) -> ComponentIndex {
-        match self {
-            Claim::Model(claim) => claim.component,
-            Claim::Composition(claim) => claim.prefixes,
-            Claim::Join(claim) => claim.component,
-            Claim::Extension(claim) => claim.component,
         }
     }
 }
@@ -99,10 +88,9 @@ impl fmt::Display for Claim {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{} claim: {} models for component/prefix set {} under {:?}",
+            "{} claim: {} models under {:?}",
             self.tag(),
             self.count(),
-            self.component(),
             self.assumption()
         )
     }
@@ -113,9 +101,9 @@ pub struct Trace {
     pub n_vars: usize,
     pub n_orig_clauses: usize,
     pub clauses: Vec<Clause>,
-    pub components: BTreeMap<ComponentIndex, Component>,
-    prefix_sets: BTreeMap<PrefixSetIndex, PrefixSet>,
-    claims: HashMap<ComponentIndex, BTreeMap<Assumption, Claim>>,
+    pub components: HashMap<ComponentIndex, Component>,
+    proofs: HashMap<ProofIndex, ExhaustivenessProof>,
+    claims: HashMap<ComponentIndex, Vec<Claim>>,
 }
 
 impl Trace {
@@ -134,95 +122,129 @@ impl Trace {
             n_vars: vars,
             n_orig_clauses: clauses,
             clauses: Vec::new(),
-            components: BTreeMap::new(),
-            prefix_sets: BTreeMap::new(),
+            components: HashMap::new(),
+            proofs: HashMap::new(),
             claims: HashMap::new(),
         }
     }
 
-    /// Insert a prefix set.
-    pub fn insert_prefixes(&mut self, set: PrefixSet) -> Result<(), IntegrityError> {
-        if !self.components.contains_key(&set.component) {
-            return Err(IntegrityError::MissingComponentDef(set.component));
+    pub fn comp_id_of(&self, claim: &Claim) -> ComponentIndex {
+        match claim {
+            Claim::Model(c) => c.component,
+            Claim::Extension(c) => c.component,
+            Claim::Join(c) => c.component,
+            Claim::Composition(c) => self.get_proof(c.proof).unwrap().component,
         }
-        let set_index = set.index;
-        if self.prefix_sets.insert(set_index, set).is_some() {
-            return Err(IntegrityError::DuplicateSetId(set_index));
+    }
+
+    /// Add an exhaustiveness proof.
+    pub fn add_proof(&mut self, proof: ExhaustivenessProof) -> Result<(), IntegrityError> {
+        if !self.components.contains_key(&proof.component) {
+            return Err(IntegrityError::MissingComponentDef(proof.component));
+        }
+        let proof_index = proof.index;
+        if self.proofs.insert(proof_index, proof).is_some() {
+            return Err(IntegrityError::DuplicateProofId(proof_index));
         }
         Ok(())
     }
 
-    pub fn insert_model(
+    pub fn add_proof_step(
         &mut self,
-        set: PrefixSetIndex,
-        model: Model,
+        proof: ProofIndex,
+        step: Vec<Lit>,
     ) -> Result<(), IntegrityError> {
-        let pset = match self.prefix_sets.get_mut(&set) {
-            Some(l) => l,
-            None => return Err(IntegrityError::MissingPrefixSet(set)),
+        let prf = match self.proofs.get_mut(&proof) {
+            Some(p) => p,
+            None => return Err(IntegrityError::MissingExhaustivenessProof(proof)),
         };
-        let model_vars = BTreeSet::from_iter(vars_iter(model.iter()));
-        if model_vars != pset.vars {
-            eprintln! {"assumption vars: {:?} prefix vars: {:?}", model_vars, pset.vars};
-            return Err(IntegrityError::InvalidModel(Box::new(model)));
-        }
-        if !pset.insert(model) {
-            return Err(IntegrityError::DuplicateModel(set));
-        }
+        prf.add_step(step);
         Ok(())
     }
 
-    pub fn get_prefixes(&self, set: PrefixSetIndex) -> Option<&PrefixSet> {
-        self.prefix_sets.get(&set)
+    pub fn get_proof(&self, proof: ProofIndex) -> Option<&ExhaustivenessProof> {
+        self.proofs.get(&proof)
     }
 
-    pub fn get_prefix_sets(&self) -> impl Iterator<Item = &PrefixSetIndex> {
-        self.prefix_sets.keys()
+    pub fn get_proofs(&self) -> impl Iterator<Item = &ExhaustivenessProof> {
+        self.proofs.values()
     }
 
     pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
-        self.claims.values().map(|t| t.values()).flatten()
+        self.claims.values().map(|t| t.iter()).flatten()
+    }
+
+    pub fn get_component_claims(
+        &self,
+        comp: ComponentIndex,
+    ) -> Option<impl Iterator<Item = &Claim>> {
+        self.claims.get(&comp).map(|t| t.iter())
+    }
+
+    pub fn add_exhaustiveness_for(
+        &mut self,
+        proof: ProofIndex,
+        assm: Assumption,
+        vars: BTreeSet<Var>,
+    ) -> Result<(), IntegrityError> {
+        let prf = match self.proofs.get_mut(&proof) {
+            Some(p) => p,
+            None => return Err(IntegrityError::MissingExhaustivenessProof(proof)),
+        };
+        prf.claimed_exhaustive_for.push((assm, vars));
+        Ok(())
     }
 
     pub fn has_join_claims(&self, comp: ComponentIndex) -> bool {
-        self.claims
-            .get(&comp)
-            .and_then(|v| {
-                Some(v.values().any(|c| match c {
+        self.get_component_claims(comp)
+            .map(|mut cl| {
+                cl.find(|c| match c {
                     Claim::Join(_) => true,
                     _ => false,
-                }))
+                })
+                .is_some()
             })
             .unwrap_or(false)
     }
 
-    pub fn component_claims(&self, comp: ComponentIndex) -> Option<&BTreeMap<Assumption, Claim>> {
-        self.claims.get(&comp)
+    pub fn find_claims<'a>(
+        &'a self,
+        comp: ComponentIndex,
+        assm_vars: BTreeSet<Var>,
+    ) -> Option<impl Iterator<Item = &'a Claim>> {
+        self.claims.get(&comp).map(move |c| {
+            c.iter().filter(move |claim| {
+                claim.assumption().len() == assm_vars.len()
+                    && BTreeSet::from_iter(vars_iter(claim.assumption().iter())) == assm_vars
+            })
+        })
     }
 
     pub fn find_claim(&self, comp: ComponentIndex, assm: &Assumption) -> Option<&Claim> {
-        self.claims.get(&comp).and_then(|c| c.get(assm))
+        self.claims
+            .get(&comp)
+            .and_then(move |c| c.iter().find(move |claim| claim.assumption() == assm))
     }
 
     fn insert_claim_unchecked(
         &mut self,
         comp: ComponentIndex,
-        assm: Assumption,
         claim: Claim,
     ) -> Result<(), IntegrityError> {
         if !self.components.contains_key(&comp) {
             return Err(IntegrityError::MissingComponentDef(comp));
         }
-        let comp_claims = match self.claims.get_mut(&comp) {
-            Some(claims) => claims,
-            None => {
-                self.claims.insert(comp, BTreeMap::new());
-                self.claims.get_mut(&comp).unwrap()
-            }
-        };
-        if comp_claims.insert(assm, claim).is_some() {
+
+        // check for duplicate claims
+        let duplicate = self.find_claim(comp, claim.assumption()).is_some();
+
+        if duplicate {
             return Err(IntegrityError::DuplicateClaim(comp));
         }
+        if !self.claims.contains_key(&comp) {
+            self.claims.insert(comp, vec![]);
+        }
+        self.claims.get_mut(&comp).unwrap().push(claim);
         Ok(())
     }
 
@@ -230,19 +252,19 @@ impl Trace {
         &mut self,
         claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
-        let comp_id = match self.prefix_sets.get(&claim.prefixes) {
+        let comp_id = match self.proofs.get(&claim.proof) {
             Some(l) => l.component,
-            None => return Err(IntegrityError::MissingPrefixSet(claim.prefixes)),
+            None => return Err(IntegrityError::MissingExhaustivenessProof(claim.proof)),
         };
-        self.insert_claim_unchecked(comp_id, claim.assm.clone(), Claim::Composition(claim))
+        self.insert_claim_unchecked(comp_id, Claim::Composition(claim))
     }
 
     pub fn insert_model_claim(&mut self, claim: ModelClaim) -> Result<(), IntegrityError> {
-        self.insert_claim_unchecked(claim.component, claim.model.clone(), Claim::Model(claim))
+        self.insert_claim_unchecked(claim.component, Claim::Model(claim))
     }
 
     pub fn insert_join_claim(&mut self, claim: JoinClaim) -> Result<(), IntegrityError> {
-        self.insert_claim_unchecked(claim.component, claim.assm.clone(), Claim::Join(claim))
+        self.insert_claim_unchecked(claim.component, Claim::Join(claim))
     }
 
     pub fn insert_extension_claim(&mut self, claim: ExtensionClaim) -> Result<(), IntegrityError> {
@@ -252,14 +274,14 @@ impl Trace {
         if !self.components.contains_key(&claim.subcomponent) {
             return Err(IntegrityError::MissingComponentDef(claim.subcomponent));
         }
-        self.insert_claim_unchecked(claim.component, claim.assm.clone(), Claim::Extension(claim))
+        self.insert_claim_unchecked(claim.component, Claim::Extension(claim))
     }
 
     pub fn print_stats(&self) {
         eprintln! {"clauses: {}", self.n_orig_clauses};
         eprintln! {"variables: {}", self.n_vars};
         eprintln! {"components: {}", self.components.len()};
-        eprintln! {"prefix sets: {} with {} models in total", self.prefix_sets.len(), self.prefix_sets.values().fold(0, |acc, l| acc + l.len())};
+        eprintln! {"proofs: {} with {} steps in total", self.proofs.len(), self.proofs.values().fold(0, |acc, l| acc + l.len())};
         eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
 
@@ -268,7 +290,7 @@ impl Trace {
             .components
             .values()
             .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_orig_clauses)
-            .and_then(|c| self.claims.get(&c.index).unwrap().get(&BTreeSet::new()))
+            .and_then(|c| self.find_claim(c.index, &BTreeSet::new()))
         {
             Some(claim) => Ok(claim),
             None => Err(IntegrityError::NoRootClaim()),

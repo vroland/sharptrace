@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 mod parse;
-mod prefixes;
+mod proofs;
 mod trace;
 mod utils;
 mod verify;
@@ -81,7 +81,5 @@ impl fmt::Debug for Lit {
 pub type ClauseIndex = usize;
 /// A component index.
 pub type ComponentIndex = usize;
-/// A prefix set index.
-pub type PrefixSetIndex = usize;
-pub type Model = BTreeSet<Lit>;
+pub type ProofIndex = usize;
 pub type Assumption = BTreeSet<Lit>;

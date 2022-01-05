@@ -35,20 +35,6 @@ fn main() -> Result<(), ProofError> {
 
     let mut verifier = Verifier::new(&trace);
 
-    // verify prefix_sets
-    let set_count = trace.get_prefix_sets().count();
-    for (i, set) in trace.get_prefix_sets().enumerate() {
-        if i % (set_count / 100) == 0 {
-            eprint! {"\rverifying prefix sets... {}%", (i * 100) / set_count};
-        }
-        if let Err(e) = verifier.verify_prefixes(*set) {
-            eprintln! {};
-            eprintln! {"verification error for prefix set {}: {}", set, e}
-            std::process::exit(2);
-        }
-    }
-    eprintln! {"\rprefix sets verified.           "};
-
     // verify claims
     let claim_count = trace.get_claims().count();
     for (i, claim) in trace.get_claims().enumerate() {
@@ -57,7 +43,7 @@ fn main() -> Result<(), ProofError> {
         }
         if let Err(e) = verifier.verify_claim(claim) {
             eprintln! {};
-            eprintln! {"verification error for {}: {}", claim, e}
+            eprintln! {"verification error for {} of component {}: {}", claim, trace.comp_id_of(claim), e}
             std::process::exit(3);
         }
     }
