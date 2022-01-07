@@ -132,18 +132,12 @@ impl<'t> Verifier<'t> {
 
         for step in proof.steps.iter().chain(final_step.iter()) {
             if !Self::is_rup_inference(&formula, &step) {
-                //eprintln! {"step failed: {:?}", step};
-                continue;
+                return Err(VerificationError::InvalidExhaustivenessProof(
+                    proof.index,
+                    comp.index,
+                ));
             }
             formula.push(step.clone());
-        }
-
-        // was the empty clause accepted?
-        if formula.last() != Some(&vec![]) {
-            return Err(VerificationError::InvalidExhaustivenessProof(
-                proof.index,
-                comp.index,
-            ));
         }
         Ok(())
     }
