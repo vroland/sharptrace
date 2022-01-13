@@ -38,7 +38,7 @@ fn main() -> Result<(), ProofError> {
     // verify claims
     let claim_count = trace.get_claims().count();
     for (i, claim) in trace.get_claims().enumerate() {
-        if i % (claim_count / 100) == 0 {
+        if i % 100 == 0 {
             eprint! {"\rverifying claims... {}%", (i * 100) / claim_count};
         }
         if let Err(e) = verifier.verify_claim(claim) {
