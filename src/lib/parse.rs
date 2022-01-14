@@ -66,8 +66,8 @@ pub enum TraceLine {
 
 #[derive(Error, Debug)]
 pub enum IntegrityError {
-    #[error("an invalid clause index was given")]
-    InvalidClauseIndex(),
+    #[error("the clause with index {0} is not defined")]
+    InvalidClauseIndex(ClauseIndex),
     #[error("the variable is invalid")]
     InvalidVariable(),
     #[error("the literal is invalid, because its variable is invalid")]
@@ -147,9 +147,9 @@ impl LineParser {
     fn parselits(val: &[&str]) -> Result<Vec<Lit>, ParseError> {
         val.iter()
             .map(|i| LineParser::parsenum(*i))
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<Vec<Lit>, _>>()
             .map(|mut v| {
-                v.sort_unstable();
+                v.sort_unstable_by(|a, b| a.var().partial_cmp(&b.var()).unwrap());
                 v
             })
     }
@@ -268,6 +268,46 @@ impl Iterator for LineParser {
     }
 }
 
+fn checked_litset(trace: &Trace, vec: Vec<Lit>) -> Result<Vec<Lit>, IntegrityError> {
+    if vec.iter().any(|v| !trace.check_lit(*v)) {
+        return Err(IntegrityError::InvalidVariable());
+    }
+
+    if !vec.windows(2).all(|w| w[0].var() <= w[1].var()) {
+        return Err(IntegrityError::ListInconsistent());
+    };
+    Ok(vec)
+}
+
+fn checked_varset(trace: &Trace, mut vec: Vec<Var>) -> Result<Vec<Var>, IntegrityError> {
+    if vec.iter().any(|v| !trace.check_var(*v)) {
+        return Err(IntegrityError::InvalidVariable());
+    }
+
+    if !vec.windows(2).all(|w| w[0] <= w[1]) {
+        return Err(IntegrityError::ListInconsistent());
+    };
+
+    Ok(vec)
+}
+
+fn checked_clauseset(
+    trace: &Trace,
+    mut vec: Vec<ClauseIndex>,
+) -> Result<Vec<ClauseIndex>, IntegrityError> {
+    let index_invalid = |c: &ClauseIndex| -> bool { !(*c > 0 && *c <= trace.clauses.len()) };
+    if vec.iter().any(index_invalid) {
+        Err(IntegrityError::InvalidClauseIndex(
+            vec.iter().copied().find(index_invalid).unwrap(),
+        ))
+    } else {
+        if !vec.windows(2).all(|w| w[0] <= w[1]) {
+            return Err(IntegrityError::ListInconsistent());
+        };
+        Ok(vec)
+    }
+}
+
 #[derive(Debug)]
 pub struct BodyParser {
     trace: Trace,
@@ -277,47 +317,6 @@ pub struct BodyParser {
 
 // FIXME: eventually, this should work in a streaming fashion
 impl BodyParser {
-    fn checked_litset(&self, vec: Vec<Lit>) -> Result<BTreeSet<Lit>, IntegrityError> {
-        if vec.iter().any(|v| !self.trace.check_lit(*v)) {
-            Err(IntegrityError::InvalidVariable())
-        } else {
-            if !vec.windows(2).all(|w| w[0] < w[1]) {
-                return Err(IntegrityError::ListInconsistent());
-            };
-            Ok(BTreeSet::from_iter(vec))
-        }
-    }
-
-    fn checked_varset(&self, mut vec: Vec<Var>) -> Result<BTreeSet<Var>, IntegrityError> {
-        if vec.iter().any(|v| !self.trace.check_var(*v)) {
-            Err(IntegrityError::InvalidVariable())
-        } else {
-            if !vec.windows(2).all(|w| w[0] < w[1]) {
-                return Err(IntegrityError::ListInconsistent());
-            };
-            Ok(BTreeSet::from_iter(vec.drain(..)))
-        }
-    }
-
-    fn checked_clauseset(
-        &self,
-        mut vec: Vec<ClauseIndex>,
-    ) -> Result<BTreeSet<ClauseIndex>, IntegrityError> {
-        if vec
-            .iter()
-            .any(|v| !(*v > 0 && *v <= self.trace.clauses.len()))
-        {
-            eprintln! {"{:?}", vec};
-            Err(IntegrityError::InvalidClauseIndex())
-        } else {
-            if !vec.windows(2).all(|w| w[0] < w[1]) {
-                eprintln! {"{:?}", vec};
-                return Err(IntegrityError::ListInconsistent());
-            };
-            Ok(BTreeSet::from_iter(vec.drain(..)))
-        }
-    }
-
     fn parse_line(&mut self, line: TraceLine, ln: usize) -> Result<(), (usize, IntegrityError)> {
         match line {
             TraceLine::ComponentDef {
@@ -327,8 +326,8 @@ impl BodyParser {
             } => {
                 let comp = Component {
                     index,
-                    vars: self.checked_varset(vars).map_err(|e| (ln, e))?,
-                    clauses: self.checked_clauseset(clauses).map_err(|e| (ln, e))?,
+                    vars: checked_varset(&self.trace, vars).map_err(|e| (ln, e))?,
+                    clauses: checked_clauseset(&self.trace, clauses).map_err(|e| (ln, e))?,
                 };
                 if self.trace.components.insert(comp.index, comp).is_some() {
                     return Err((ln, IntegrityError::DuplicateComponentId(index)));
@@ -343,8 +342,8 @@ impl BodyParser {
                 .add_proof_step(proof, lits)
                 .map_err(|e| (ln, e))?,
             TraceLine::ExhaustivenessStatement { proof, assm, vars } => {
-                let assm = self.checked_litset(assm).map_err(|e| (ln, e))?;
-                let vars = self.checked_varset(vars).map_err(|e| (ln, e))?;
+                let assm = checked_litset(&self.trace, assm).map_err(|e| (ln, e))?;
+                let vars = checked_varset(&self.trace, vars).map_err(|e| (ln, e))?;
                 self.trace
                     .add_exhaustiveness_for(proof, assm, vars)
                     .map_err(|e| (ln, e))?
@@ -353,7 +352,7 @@ impl BodyParser {
                 .trace
                 .insert_model_claim(ModelClaim {
                     component,
-                    assm: self.checked_litset(model).map_err(|e| (ln, e))?,
+                    assm: checked_litset(&self.trace, model).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::CompositionClaim { proof, count, assm } => self
@@ -361,7 +360,7 @@ impl BodyParser {
                 .insert_composition_claim(CompositionClaim {
                     proof,
                     count,
-                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
+                    assm: checked_litset(&self.trace, assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::JoinChild { child, component } => {
@@ -392,7 +391,7 @@ impl BodyParser {
                 .insert_join_claim(JoinClaim {
                     component,
                     count,
-                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
+                    assm: checked_litset(&self.trace, assm).map_err(|e| (ln, e))?,
                     child_components: match self.join_children.remove(&component) {
                         Some(l) => l,
                         None => return Err((ln, IntegrityError::ClaimBeforeJoinChild(component))),
@@ -410,7 +409,7 @@ impl BodyParser {
                     component,
                     subcomponent,
                     count,
-                    assm: self.checked_litset(assm).map_err(|e| (ln, e))?,
+                    assm: checked_litset(&self.trace, assm).map_err(|e| (ln, e))?,
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::Problem { .. } => return Err((ln, IntegrityError::UnexpectedProblemLine())),
@@ -453,7 +452,7 @@ impl HeaderParser {
             problem.n_orig_clauses + 1,
             Clause {
                 index: 0,
-                lits: BTreeSet::new(),
+                lits: Vec::new(),
             },
         );
 
@@ -467,12 +466,12 @@ impl HeaderParser {
                         || index > problem.n_orig_clauses
                         || problem.clauses[index].index != 0
                     {
-                        return Err((ln, IntegrityError::InvalidClauseIndex().into()));
+                        return Err((ln, IntegrityError::InvalidClauseIndex(index).into()));
                     }
-                    if lits.iter().any(|l| !problem.check_lit(*l)) {
-                        return Err((ln, IntegrityError::InvalidLiteral().into()));
-                    }
-                    let lits = BTreeSet::from_iter(lits.drain(..));
+                    lits = match checked_litset(&problem, lits) {
+                        Ok(l) => l,
+                        Err(e) => return Err((ln, ParseError::IntegrityError(e))),
+                    };
                     problem.clauses[index] = Clause { index, lits };
                     clauses_read += 1;
                 }

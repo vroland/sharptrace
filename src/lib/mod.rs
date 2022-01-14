@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -82,4 +81,4 @@ pub type ClauseIndex = usize;
 /// A component index.
 pub type ComponentIndex = usize;
 pub type ProofIndex = usize;
-pub type Assumption = BTreeSet<Lit>;
+pub type Assumption = Vec<Lit>;

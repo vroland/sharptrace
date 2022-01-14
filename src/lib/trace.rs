@@ -3,20 +3,20 @@ use crate::utils::vars_iter;
 use crate::{Assumption, ClauseIndex, ComponentIndex, IntegrityError, Lit, ProofIndex, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct Clause {
     pub index: ClauseIndex,
-    pub lits: BTreeSet<Lit>,
+    pub lits: Vec<Lit>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Component {
     pub index: ComponentIndex,
-    pub vars: BTreeSet<Var>,
-    pub clauses: BTreeSet<ClauseIndex>,
+    pub vars: Vec<Var>,
+    pub clauses: Vec<ClauseIndex>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,8 +102,8 @@ pub struct Trace {
     pub n_orig_clauses: usize,
     pub clauses: Vec<Clause>,
     pub components: HashMap<ComponentIndex, Component>,
-    proofs: HashMap<ProofIndex, ExhaustivenessProof>,
-    claims: HashMap<ComponentIndex, Vec<Claim>>,
+    proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
+    claims: BTreeMap<ComponentIndex, Vec<Claim>>,
 }
 
 impl Trace {
@@ -123,8 +123,8 @@ impl Trace {
             n_orig_clauses: clauses,
             clauses: Vec::new(),
             components: HashMap::new(),
-            proofs: HashMap::new(),
-            claims: HashMap::new(),
+            proofs: BTreeMap::new(),
+            claims: BTreeMap::new(),
         }
     }
 
@@ -185,7 +185,7 @@ impl Trace {
         &mut self,
         proof: ProofIndex,
         assm: Assumption,
-        vars: BTreeSet<Var>,
+        vars: Vec<Var>,
     ) -> Result<(), IntegrityError> {
         let prf = match self.proofs.get_mut(&proof) {
             Some(p) => p,
@@ -210,12 +210,12 @@ impl Trace {
     pub fn find_claims<'a>(
         &'a self,
         comp: ComponentIndex,
-        assm_vars: BTreeSet<Var>,
+        assm_vars: Vec<Var>,
     ) -> Option<impl Iterator<Item = &'a Claim>> {
         self.claims.get(&comp).map(move |c| {
             c.iter().filter(move |claim| {
                 claim.assumption().len() == assm_vars.len()
-                    && BTreeSet::from_iter(vars_iter(claim.assumption().iter())) == assm_vars
+                    && Vec::from_iter(vars_iter(claim.assumption().iter())) == assm_vars
             })
         })
     }
@@ -290,7 +290,7 @@ impl Trace {
             .components
             .values()
             .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_orig_clauses)
-            .and_then(|c| self.find_claim(c.index, &BTreeSet::new()))
+            .and_then(|c| self.find_claim(c.index, &Vec::new()))
         {
             Some(claim) => Ok(claim),
             None => Err(IntegrityError::NoRootClaim()),

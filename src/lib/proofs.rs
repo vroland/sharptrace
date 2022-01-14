@@ -8,7 +8,7 @@ pub struct ExhaustivenessProof {
     pub steps: Vec<Vec<Lit>>,
     // pairs of assumptions and prefix
     // variables this proof is claimed to be exhaustive for
-    pub claimed_exhaustive_for: Vec<(Assumption, BTreeSet<Var>)>,
+    pub claimed_exhaustive_for: Vec<(Assumption, Vec<Var>)>,
 }
 
 impl ExhaustivenessProof {

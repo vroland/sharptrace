@@ -3,7 +3,7 @@ use crate::utils::{vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -49,7 +49,7 @@ pub enum VerificationError {
 
 fn restrict_clause<'a, 'b: 'a>(
     clause: impl Iterator<Item = &'a Lit> + 'a,
-    vars: &'b BTreeSet<Var>,
+    vars: &'b Vec<Var>,
 ) -> impl Iterator<Item = Lit> + 'a {
     clause.filter_map(|l| {
         if vars.contains(&l.var()) {
@@ -70,6 +70,18 @@ enum BcpResult {
     Conflict,
 }
 
+fn is_subset<T: PartialEq>(s1: &[T], s2: &[T]) -> bool {
+    s1.iter().all(|v| s2.contains(v))
+}
+
+fn difference<T: PartialEq + Copy>(s1: &[T], s2: &[T]) -> Vec<T> {
+    s1.iter().filter(|v| !s2.contains(v)).copied().collect()
+}
+
+fn intersection<T: PartialEq + Copy>(s1: &[T], s2: &[T]) -> Vec<T> {
+    s1.iter().filter(|v| s2.contains(v)).copied().collect()
+}
+
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
@@ -83,12 +95,12 @@ impl<'t> Verifier<'t> {
     fn proof_for_claim(
         &self,
         claim: &CompositionClaim,
-    ) -> Result<(&ExhaustivenessProof, &(Assumption, BTreeSet<Var>)), VerificationError> {
+    ) -> Result<(&ExhaustivenessProof, &(Assumption, Vec<Var>)), VerificationError> {
         let proof = self.trace.get_proof(claim.proof).unwrap();
         let comp = self.trace.components.get(&proof.component).unwrap();
 
         for stmt in &proof.claimed_exhaustive_for {
-            if stmt.1.is_subset(&comp.vars) && stmt.0 == claim.assm {
+            if is_subset(&stmt.1, &comp.vars) && stmt.0 == claim.assm {
                 return Ok((proof, stmt));
             }
         }
@@ -102,7 +114,7 @@ impl<'t> Verifier<'t> {
         &self,
         proof: &ExhaustivenessProof,
         assm: &Assumption,
-        pvars: &BTreeSet<Var>,
+        pvars: &Vec<Var>,
     ) -> Result<(), VerificationError> {
         let comp = self.trace.components.get(&proof.component).unwrap();
 
@@ -132,12 +144,16 @@ impl<'t> Verifier<'t> {
 
         for step in proof.steps.iter().chain(final_step.iter()) {
             if !Self::is_rup_inference(&formula, &step) {
-                return Err(VerificationError::InvalidExhaustivenessProof(
-                    proof.index,
-                    comp.index,
-                ));
+                eprintln! {"step failed: {:?} in proof {}", step, proof.index};
+            } else {
+                formula.push(step.clone());
             }
-            formula.push(step.clone());
+        }
+        if formula.last().unwrap().len() != 0 {
+            return Err(VerificationError::InvalidExhaustivenessProof(
+                proof.index,
+                comp.index,
+            ));
         }
         Ok(())
     }
@@ -190,7 +206,7 @@ impl<'t> Verifier<'t> {
             .trace
             .find_claims(proof.component, vars.clone())
             .unwrap()
-            .filter(|claim| claim.assumption().is_superset(&composition.assm))
+            .filter(|claim| is_subset(&composition.assm, claim.assumption()))
         {
             count += claim.count()
         }
@@ -230,36 +246,43 @@ impl<'t> Verifier<'t> {
             return Ok(());
         }
 
-        if children.iter().any(|c| !c.vars.is_subset(&component.vars)) {
+        if children
+            .iter()
+            .any(|c| !is_subset(&c.vars, &component.vars))
+        {
             return Err(VerificationError::ChildVarsInvalid());
         }
         if children
             .iter()
-            .any(|c| !c.clauses.is_subset(&component.clauses))
+            .any(|c| !is_subset(&c.clauses, &component.clauses))
         {
             return Err(VerificationError::ChildClausesInvalid());
         }
 
         // do subcomponents cover parent components?
-        let vars_union = children.iter().fold(BTreeSet::new(), |acc, comp| {
-            BTreeSet::from_iter(acc.union(&comp.vars).copied())
+        let mut vars_union = children.iter().fold(Vec::new(), |mut acc, comp| {
+            acc.extend_from_slice(&comp.vars);
+            acc
         });
+        vars_union.sort_unstable();
 
         if vars_union != component.vars {
             return Err(VerificationError::ChildVarsInsufficient());
         }
 
-        let clauses_union = children.iter().fold(BTreeSet::new(), |acc, comp| {
-            BTreeSet::from_iter(acc.union(&comp.clauses).copied())
+        let mut clauses_union = children.iter().fold(Vec::new(), |mut acc, comp| {
+            acc.extend_from_slice(&comp.clauses);
+            acc
         });
+        clauses_union.sort_unstable();
+
         if clauses_union != component.clauses {
             return Err(VerificationError::ChildClausesInsufficient());
         }
 
         // are subcomponents compatible?
         for child_i in children {
-            let i_only_vars = component.vars.difference(&child_i.vars);
-            let i_only_vars = i_only_vars.copied().collect();
+            let i_only_vars = difference(&component.vars, &child_i.vars);
 
             for cl in &child_i.clauses {
                 let clause = &self.trace.clauses[*cl];
@@ -275,7 +298,7 @@ impl<'t> Verifier<'t> {
 
     pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
         let component = self.trace.components.get(&join.component).unwrap();
-        let assm_vars: BTreeSet<_> = vars_iter(join.assm.iter()).collect();
+        let assm_vars: Vec<_> = vars_iter(join.assm.iter()).collect();
         let children: Vec<_> = join
             .child_components
             .iter()
@@ -285,7 +308,7 @@ impl<'t> Verifier<'t> {
         // check child component validity
         self.join_subcomponents_valid(component, &children)?;
 
-        if !assm_vars.is_subset(&component.vars) {
+        if !is_subset(&assm_vars, &component.vars) {
             return Err(VerificationError::InvalidAssumptionVariables());
         }
 
@@ -296,10 +319,8 @@ impl<'t> Verifier<'t> {
                     continue;
                 }
 
-                let intersection_vars = child_i.vars.intersection(&child_j.vars);
-                let intersection_vars: BTreeSet<_> = intersection_vars.copied().collect();
-
-                if !intersection_vars.is_subset(&assm_vars) {
+                let intersection_vars = intersection(&child_i.vars, &child_j.vars);
+                if !is_subset(&intersection_vars, &assm_vars) {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
             }
@@ -325,18 +346,23 @@ impl<'t> Verifier<'t> {
         let comp = self.trace.components.get(&extension.component).unwrap();
         let subcomp = self.trace.components.get(&extension.subcomponent).unwrap();
 
-        if !subcomp.vars.is_subset(&comp.vars) {
+        if !is_subset(&subcomp.vars, &comp.vars) {
             return Err(VerificationError::ChildVarsInvalid());
         }
-        if !subcomp.clauses.is_subset(&comp.clauses) {
+        if !is_subset(&subcomp.clauses, &comp.clauses) {
             return Err(VerificationError::ChildClausesInvalid());
         }
 
         // check allowed clauses
-        let introduced_vars = comp.vars.difference(&subcomp.vars).copied().collect();
-        let restricted_assm = restrict_clause(extension.assm.iter(), &introduced_vars).collect();
+        let introduced_vars = difference(&comp.vars, &subcomp.vars);
+        let restricted_assm: Vec<_> =
+            restrict_clause(extension.assm.iter(), &introduced_vars).collect();
         for cl in &subcomp.clauses {
-            if !self.trace.clauses[*cl].lits.is_disjoint(&restricted_assm) {
+            if self.trace.clauses[*cl]
+                .lits
+                .iter()
+                .any(|l| restricted_assm.contains(l))
+            {
                 return Err(VerificationError::IllegalExtensionClause(
                     *cl,
                     subcomp.index,
@@ -359,7 +385,8 @@ impl<'t> Verifier<'t> {
 
     pub fn verify_model_claim(&mut self, mc: &ModelClaim) -> Result<(), VerificationError> {
         let comp = self.trace.components.get(&mc.component).unwrap();
-        let mc_vars = vars_iter(mc.assm.iter()).collect();
+        let mut mc_vars: Vec<_> = vars_iter(mc.assm.iter()).collect();
+        mc_vars.sort_unstable();
         if comp.vars != mc_vars {
             return Err(VerificationError::InvalidAssumptionVariables());
         }
