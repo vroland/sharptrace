@@ -18,7 +18,7 @@ pub type Var = isize;
 pub struct Lit(isize);
 
 impl Lit {
-    pub fn from_dimacs(l: isize) -> Self {
+    pub const fn from_dimacs(l: isize) -> Self {
         Lit(l)
     }
 
@@ -28,6 +28,10 @@ impl Lit {
 
     pub fn var(self) -> Var {
         self.0.abs()
+    }
+
+    pub fn as_int(self) -> isize {
+        self.0
     }
 }
 

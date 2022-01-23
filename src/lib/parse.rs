@@ -1,4 +1,4 @@
-use crate::proofs::ExhaustivenessProof;
+use crate::proofs::ProofBody;
 use crate::*;
 use num_bigint::BigUint;
 use std::collections::HashMap;
@@ -279,7 +279,7 @@ fn checked_litset(trace: &Trace, vec: Vec<Lit>) -> Result<Vec<Lit>, IntegrityErr
     Ok(vec)
 }
 
-fn checked_varset(trace: &Trace, mut vec: Vec<Var>) -> Result<Vec<Var>, IntegrityError> {
+fn checked_varset(trace: &Trace, vec: Vec<Var>) -> Result<Vec<Var>, IntegrityError> {
     if vec.iter().any(|v| !trace.check_var(*v)) {
         return Err(IntegrityError::InvalidVariable());
     }
@@ -293,7 +293,7 @@ fn checked_varset(trace: &Trace, mut vec: Vec<Var>) -> Result<Vec<Var>, Integrit
 
 fn checked_clauseset(
     trace: &Trace,
-    mut vec: Vec<ClauseIndex>,
+    vec: Vec<ClauseIndex>,
 ) -> Result<Vec<ClauseIndex>, IntegrityError> {
     let index_invalid = |c: &ClauseIndex| -> bool { !(*c > 0 && *c <= trace.clauses.len()) };
     if vec.iter().any(index_invalid) {
@@ -313,6 +313,7 @@ pub struct BodyParser {
     trace: Trace,
     lp: LineParser,
     join_children: HashMap<ComponentIndex, Vec<ComponentIndex>>,
+    proof_bodies: HashMap<ProofIndex, ProofBody>,
 }
 
 // FIXME: eventually, this should work in a streaming fashion
@@ -329,24 +330,38 @@ impl BodyParser {
                     vars: checked_varset(&self.trace, vars).map_err(|e| (ln, e))?,
                     clauses: checked_clauseset(&self.trace, clauses).map_err(|e| (ln, e))?,
                 };
-                if self.trace.components.insert(comp.index, comp).is_some() {
-                    return Err((ln, IntegrityError::DuplicateComponentId(index)));
+                self.trace.insert_component(comp).map_err(|e| (ln, e))?
+            }
+            TraceLine::ExhaustivenessDef { index, component } => {
+                if let Some(bdy) = self
+                    .proof_bodies
+                    .insert(index, ProofBody::new(index, component))
+                {
+                    return Err((ln, IntegrityError::DuplicateProofId(bdy.index)));
                 }
             }
-            TraceLine::ExhaustivenessDef { index, component } => self
-                .trace
-                .add_proof(ExhaustivenessProof::new(index, component))
-                .map_err(|e| (ln, e))?,
-            TraceLine::ExhaustivenessStep { proof, lits } => self
-                .trace
-                .add_proof_step(proof, lits)
-                .map_err(|e| (ln, e))?,
-            TraceLine::ExhaustivenessStatement { proof, assm, vars } => {
-                let assm = checked_litset(&self.trace, assm).map_err(|e| (ln, e))?;
-                let vars = checked_varset(&self.trace, vars).map_err(|e| (ln, e))?;
-                self.trace
-                    .add_exhaustiveness_for(proof, assm, vars)
-                    .map_err(|e| (ln, e))?
+            TraceLine::ExhaustivenessStep { proof, lits } => {
+                if let Some(bdy) = self.proof_bodies.get_mut(&proof) {
+                    bdy.add_step(lits)
+                } else {
+                    return Err((ln, IntegrityError::MissingExhaustivenessProof(proof)));
+                }
+            }
+            TraceLine::ExhaustivenessStatement {
+                proof,
+                assm: _,
+                vars,
+            } => {
+                if let Some(bdy) = self.proof_bodies.remove(&proof) {
+                    //let assm = checked_litset(&self.trace, assm).map_err(|e| (ln, e))?;
+                    let vars = checked_varset(&self.trace, vars).map_err(|e| (ln, e))?;
+                    let proof = bdy.finalize(&vars, &self.trace).map_err(|e| (ln, e))?;
+                    self.trace
+                        .add_exhaustiveness_proof(proof)
+                        .map_err(|e| (ln, e))?
+                } else {
+                    return Err((ln, IntegrityError::MissingExhaustivenessProof(proof)));
+                }
             }
             TraceLine::ModelClaim { component, model } => self
                 .trace
@@ -364,15 +379,16 @@ impl BodyParser {
                 })
                 .map_err(|e| (ln, e))?,
             TraceLine::JoinChild { child, component } => {
-                if !self.trace.components.contains_key(&child) {
+                if !self.trace.get_component(&child).is_some() {
                     return Err((ln, IntegrityError::MissingComponentDef(child)));
                 };
-                if !self.trace.components.contains_key(&component) {
+                if !self.trace.get_component(&component).is_some() {
                     return Err((ln, IntegrityError::MissingComponentDef(component)));
                 };
                 if self.trace.has_join_claims(component) {
                     return Err((ln, IntegrityError::ClaimBeforeJoinChild(component)));
                 }
+
                 let children = match self.join_children.get_mut(&component) {
                     Some(l) => l,
                     None => {
@@ -392,9 +408,13 @@ impl BodyParser {
                     component,
                     count,
                     assm: checked_litset(&self.trace, assm).map_err(|e| (ln, e))?,
-                    child_components: match self.join_children.remove(&component) {
-                        Some(l) => l,
-                        None => return Err((ln, IntegrityError::ClaimBeforeJoinChild(component))),
+                    child_components: {
+                        match self.join_children.get(&component) {
+                            Some(l) => l.clone(),
+                            None => {
+                                return Err((ln, IntegrityError::ClaimBeforeJoinChild(component)))
+                            }
+                        }
                     },
                 })
                 .map_err(|e| (ln, e))?,
@@ -485,6 +505,7 @@ impl HeaderParser {
             trace: problem,
             lp: self.lp,
             join_children: HashMap::new(),
+            proof_bodies: HashMap::new(),
         })
     }
 }

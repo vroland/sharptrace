@@ -5,6 +5,7 @@ use num_bigint::BigUint;
 use num_traits::identities::One;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 pub struct Clause {
@@ -96,13 +97,13 @@ impl fmt::Display for Claim {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Trace {
     pub n_vars: usize,
     pub n_orig_clauses: usize,
     pub clauses: Vec<Clause>,
-    pub components: HashMap<ComponentIndex, Component>,
-    proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
+    components: HashMap<ComponentIndex, Component>,
+    proofs: BTreeMap<ProofIndex, Mutex<ExhaustivenessProof>>,
     claims: BTreeMap<ComponentIndex, Vec<Claim>>,
 }
 
@@ -137,41 +138,18 @@ impl Trace {
         }
     }
 
-    /// Add an exhaustiveness proof.
-    pub fn add_proof(&mut self, proof: ExhaustivenessProof) -> Result<(), IntegrityError> {
-        if !self.components.contains_key(&proof.component) {
-            return Err(IntegrityError::MissingComponentDef(proof.component));
-        }
-        let proof_index = proof.index;
-        if self.proofs.insert(proof_index, proof).is_some() {
-            return Err(IntegrityError::DuplicateProofId(proof_index));
-        }
-        Ok(())
-    }
-
-    pub fn add_proof_step(
-        &mut self,
-        proof: ProofIndex,
-        step: Vec<Lit>,
-    ) -> Result<(), IntegrityError> {
-        let prf = match self.proofs.get_mut(&proof) {
-            Some(p) => p,
-            None => return Err(IntegrityError::MissingExhaustivenessProof(proof)),
-        };
-        prf.add_step(step);
-        Ok(())
-    }
-
-    pub fn get_proof(&self, proof: ProofIndex) -> Option<&ExhaustivenessProof> {
-        self.proofs.get(&proof)
-    }
-
-    pub fn get_proofs(&self) -> impl Iterator<Item = &ExhaustivenessProof> {
-        self.proofs.values()
+    pub fn get_proof(&self, proof: ProofIndex) -> Option<MutexGuard<'_, ExhaustivenessProof>> {
+        self.proofs
+            .get(&proof)
+            .map(|prf| prf.lock().expect("error aquiring proof lock!"))
     }
 
     pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
         self.claims.values().map(|t| t.iter()).flatten()
+    }
+
+    pub fn get_component(&self, index: &ComponentIndex) -> Option<&Component> {
+        self.components.get(index)
     }
 
     pub fn get_component_claims(
@@ -181,17 +159,17 @@ impl Trace {
         self.claims.get(&comp).map(|t| t.iter())
     }
 
-    pub fn add_exhaustiveness_for(
+    pub fn add_exhaustiveness_proof(
         &mut self,
-        proof: ProofIndex,
-        assm: Assumption,
-        vars: Vec<Var>,
+        proof: ExhaustivenessProof,
     ) -> Result<(), IntegrityError> {
-        let prf = match self.proofs.get_mut(&proof) {
-            Some(p) => p,
-            None => return Err(IntegrityError::MissingExhaustivenessProof(proof)),
-        };
-        prf.claimed_exhaustive_for.push((assm, vars));
+        if !self.components.contains_key(&proof.component) {
+            return Err(IntegrityError::MissingComponentDef(proof.component));
+        }
+        let proof_index = proof.index;
+        if self.proofs.insert(proof_index, Mutex::new(proof)).is_some() {
+            return Err(IntegrityError::DuplicateProofId(proof_index));
+        }
         Ok(())
     }
 
@@ -205,6 +183,15 @@ impl Trace {
                 .is_some()
             })
             .unwrap_or(false)
+    }
+
+    pub fn insert_component(&mut self, comp: Component) -> Result<(), IntegrityError> {
+        let index = comp.index;
+        if self.components.insert(index, comp).is_some() {
+            return Err(IntegrityError::DuplicateComponentId(index));
+        }
+        self.claims.insert(index, vec![]);
+        Ok(())
     }
 
     pub fn find_claims<'a>(
@@ -241,9 +228,7 @@ impl Trace {
         if duplicate {
             return Err(IntegrityError::DuplicateClaim(comp));
         }
-        if !self.claims.contains_key(&comp) {
-            self.claims.insert(comp, vec![]);
-        }
+        assert! {self.claims.contains_key(&comp)};
         self.claims.get_mut(&comp).unwrap().push(claim);
         Ok(())
     }
@@ -253,7 +238,7 @@ impl Trace {
         claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
         let comp_id = match self.proofs.get(&claim.proof) {
-            Some(l) => l.component,
+            Some(l) => l.lock().expect("unable to aquire proof lock!").component,
             None => return Err(IntegrityError::MissingExhaustivenessProof(claim.proof)),
         };
         self.insert_claim_unchecked(comp_id, Claim::Composition(claim))
@@ -281,7 +266,7 @@ impl Trace {
         eprintln! {"clauses: {}", self.n_orig_clauses};
         eprintln! {"variables: {}", self.n_vars};
         eprintln! {"components: {}", self.components.len()};
-        eprintln! {"proofs: {} with {} steps in total", self.proofs.len(), self.proofs.values().fold(0, |acc, l| acc + l.len())};
+        eprintln! {"proofs: {} with {} steps in total", self.proofs.len(), self.proofs.values().fold(0, |acc, l| acc + l.lock().expect("unable to lock proof!").len())};
         eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
 

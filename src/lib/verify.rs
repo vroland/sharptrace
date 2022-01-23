@@ -1,5 +1,4 @@
-use crate::proofs::ExhaustivenessProof;
-use crate::utils::{vars_disjoint, vars_iter};
+use crate::utils::{restrict_clause, vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
@@ -47,29 +46,6 @@ pub enum VerificationError {
     NoSupportingClaim(Box<Assumption>),
 }
 
-fn restrict_clause<'a, 'b: 'a>(
-    clause: impl Iterator<Item = &'a Lit> + 'a,
-    vars: &'b Vec<Var>,
-) -> impl Iterator<Item = Lit> + 'a {
-    clause.filter_map(|l| {
-        if vars.contains(&l.var()) {
-            Some(*l)
-        } else {
-            None
-        }
-    })
-}
-
-fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = Lit> + 'a {
-    m.map(|l| -l)
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum BcpResult {
-    Success,
-    Conflict,
-}
-
 fn is_subset<T: PartialEq>(s1: &[T], s2: &[T]) -> bool {
     s1.iter().all(|v| s2.contains(v))
 }
@@ -90,121 +66,24 @@ impl<'t> Verifier<'t> {
         }
     }
 
-    /// checks that a given proof matches the claim
-    /// returns proof and chosed exhaustiveness statement.
-    fn proof_for_claim(
-        &self,
-        claim: &CompositionClaim,
-    ) -> Result<(&ExhaustivenessProof, &(Assumption, Vec<Var>)), VerificationError> {
-        let proof = self.trace.get_proof(claim.proof).unwrap();
-        let comp = self.trace.components.get(&proof.component).unwrap();
-
-        for stmt in &proof.claimed_exhaustive_for {
-            if is_subset(&stmt.1, &comp.vars) && stmt.0 == claim.assm {
-                return Ok((proof, stmt));
-            }
-        }
-        Err(VerificationError::NoApplicableProof(
-            claim.proof,
-            Box::new(claim.assm.clone()),
-        ))
-    }
-
-    pub fn verify_exhaustiveness(
-        &self,
-        proof: &ExhaustivenessProof,
-        assm: &Assumption,
-        pvars: &Vec<Var>,
+    pub fn verify_composition(
+        &mut self,
+        composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let comp = self.trace.components.get(&proof.component).unwrap();
+        let mut proof = self.trace.get_proof(composition.proof).unwrap();
+        let comp = self.trace.get_component(&proof.component).unwrap();
 
-        let mut formula = vec![];
-
-        // exhaustiveness formula - assumption
-        for lit in assm {
-            formula.push(vec![*lit]);
-        }
-
-        // exhaustiveness formula - component clauses
-        for cl in &comp.clauses {
-            let lits = &self.trace.clauses[*cl].lits;
-            let restricted = restrict_clause(lits.iter(), &comp.vars);
-            formula.push(restricted.collect());
-        }
-
-        let claims = self.trace.find_claims(comp.index, pvars.clone()).unwrap();
-
-        for claim in claims {
-            let negated = negate_model(claim.assumption().iter().copied());
-            formula.push(negated.collect());
-        }
-
-        // the final empty clause step
-        let final_step = [vec![]];
-
-        for step in proof.steps.iter().chain(final_step.iter()) {
-            if !Self::is_rup_inference(&formula, &step) {
-                eprintln! {"step failed: {:?} in proof {}", step, proof.index};
-            } else {
-                formula.push(step.clone());
-            }
-        }
-        if formula.last().unwrap().len() != 0 {
+        if !proof.is_exhaustive_for(&composition.assm) {
             return Err(VerificationError::InvalidExhaustivenessProof(
                 proof.index,
                 comp.index,
             ));
         }
-        Ok(())
-    }
-
-    fn unit_propagate(clauses: &mut Vec<Vec<Lit>>) -> BcpResult {
-        loop {
-            if clauses.is_empty() {
-                return BcpResult::Success;
-            }
-
-            let (unit, cli) = match clauses.iter().enumerate().find(|c| c.1.len() == 1) {
-                Some((idx, u)) => (u[0], idx),
-                None => return BcpResult::Success,
-            };
-
-            for cl in clauses.iter_mut() {
-                if cl.contains(&-unit) {
-                    cl.retain(|l| *l != -unit);
-                    if cl.len() == 0 {
-                        return BcpResult::Conflict;
-                    }
-                }
-            }
-
-            // remove the propagated unit clause
-            let last = clauses.len() - 1;
-            clauses.swap(cli, last);
-            clauses.pop();
-        }
-    }
-
-    fn is_rup_inference(clauses: &Vec<Vec<Lit>>, clause: &Vec<Lit>) -> bool {
-        let mut pre = clauses.clone();
-        for unit in negate_model(clause.iter().copied()) {
-            pre.push(vec![unit]);
-        }
-        Self::unit_propagate(&mut pre) == BcpResult::Conflict
-    }
-
-    pub fn verify_composition(
-        &mut self,
-        composition: &CompositionClaim,
-    ) -> Result<(), VerificationError> {
-        let (proof, (assm, vars)) = self.proof_for_claim(composition)?;
-
-        self.verify_exhaustiveness(proof, assm, vars)?;
 
         let mut count = BigUint::zero();
         for claim in self
             .trace
-            .find_claims(proof.component, vars.clone())
+            .find_claims(proof.component, Vec::from(proof.get_previx_vars()))
             .unwrap()
             .filter(|claim| is_subset(&composition.assm, claim.assumption()))
         {
@@ -265,6 +144,7 @@ impl<'t> Verifier<'t> {
             acc
         });
         vars_union.sort_unstable();
+        vars_union.dedup();
 
         if vars_union != component.vars {
             return Err(VerificationError::ChildVarsInsufficient());
@@ -275,6 +155,7 @@ impl<'t> Verifier<'t> {
             acc
         });
         clauses_union.sort_unstable();
+        clauses_union.dedup();
 
         if clauses_union != component.clauses {
             return Err(VerificationError::ChildClausesInsufficient());
@@ -297,12 +178,12 @@ impl<'t> Verifier<'t> {
     }
 
     pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
-        let component = self.trace.components.get(&join.component).unwrap();
+        let component = self.trace.get_component(&join.component).unwrap();
         let assm_vars: Vec<_> = vars_iter(join.assm.iter()).collect();
         let children: Vec<_> = join
             .child_components
             .iter()
-            .map(|idx| self.trace.components.get(idx).unwrap())
+            .map(|idx| self.trace.get_component(idx).unwrap())
             .collect();
 
         // check child component validity
@@ -343,8 +224,8 @@ impl<'t> Verifier<'t> {
         &mut self,
         extension: &ExtensionClaim,
     ) -> Result<(), VerificationError> {
-        let comp = self.trace.components.get(&extension.component).unwrap();
-        let subcomp = self.trace.components.get(&extension.subcomponent).unwrap();
+        let comp = self.trace.get_component(&extension.component).unwrap();
+        let subcomp = self.trace.get_component(&extension.subcomponent).unwrap();
 
         if !is_subset(&subcomp.vars, &comp.vars) {
             return Err(VerificationError::ChildVarsInvalid());
@@ -384,7 +265,7 @@ impl<'t> Verifier<'t> {
     }
 
     pub fn verify_model_claim(&mut self, mc: &ModelClaim) -> Result<(), VerificationError> {
-        let comp = self.trace.components.get(&mc.component).unwrap();
+        let comp = self.trace.get_component(&mc.component).unwrap();
         let mut mc_vars: Vec<_> = vars_iter(mc.assm.iter()).collect();
         mc_vars.sort_unstable();
         if comp.vars != mc_vars {
