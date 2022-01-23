@@ -1,5 +1,7 @@
+use rayon::prelude::*;
 use sharptrace_check::{HeaderParser, ParseError, VerificationError, Verifier};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,20 +35,23 @@ fn main() -> Result<(), ProofError> {
     eprintln!("done.");
     trace.print_stats();
 
-    let mut verifier = Verifier::new(&trace);
+    let verifier = Verifier::new(&trace);
 
     // verify claims
     let claim_count = trace.get_claims().count();
-    for (i, claim) in trace.get_claims().enumerate() {
-        if i % 100 == 0 {
-            eprint! {"\rverifying claims... {}%", (i * 100) / claim_count};
+    let counts_verified = AtomicUsize::new(0);
+    trace.get_claims().par_bridge().for_each(|claim| {
+        let old_count = counts_verified.fetch_add(1, Ordering::SeqCst);
+
+        if old_count % 100 == 0 {
+            eprint! {"\rverifying claims... {}%", (old_count * 100) / claim_count};
         }
         if let Err(e) = verifier.verify_claim(claim) {
             eprintln! {};
             eprintln! {"verification error for {} of component {}: {}", claim, trace.comp_id_of(claim), e}
             std::process::exit(3);
         }
-    }
+    });
     eprintln! {"\rclaims verified.          "};
 
     let root = trace.find_root_claim().map_err(ParseError::from)?;

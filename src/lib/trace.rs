@@ -5,7 +5,6 @@ use num_bigint::BigUint;
 use num_traits::identities::One;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 pub struct Clause {
@@ -103,7 +102,7 @@ pub struct Trace {
     pub n_orig_clauses: usize,
     pub clauses: Vec<Clause>,
     components: HashMap<ComponentIndex, Component>,
-    proofs: BTreeMap<ProofIndex, Mutex<ExhaustivenessProof>>,
+    proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
     claims: BTreeMap<ComponentIndex, Vec<Claim>>,
 }
 
@@ -138,10 +137,8 @@ impl Trace {
         }
     }
 
-    pub fn get_proof(&self, proof: ProofIndex) -> Option<MutexGuard<'_, ExhaustivenessProof>> {
-        self.proofs
-            .get(&proof)
-            .map(|prf| prf.lock().expect("error aquiring proof lock!"))
+    pub fn get_proof(&self, proof: ProofIndex) -> Option<&ExhaustivenessProof> {
+        self.proofs.get(&proof)
     }
 
     pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
@@ -150,6 +147,10 @@ impl Trace {
 
     pub fn get_component(&self, index: &ComponentIndex) -> Option<&Component> {
         self.components.get(index)
+    }
+
+    pub fn get_components(&self) -> impl Iterator<Item = &Component> {
+        self.components.values()
     }
 
     pub fn get_component_claims(
@@ -167,7 +168,7 @@ impl Trace {
             return Err(IntegrityError::MissingComponentDef(proof.component));
         }
         let proof_index = proof.index;
-        if self.proofs.insert(proof_index, Mutex::new(proof)).is_some() {
+        if self.proofs.insert(proof_index, proof).is_some() {
             return Err(IntegrityError::DuplicateProofId(proof_index));
         }
         Ok(())
@@ -238,7 +239,7 @@ impl Trace {
         claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
         let comp_id = match self.proofs.get(&claim.proof) {
-            Some(l) => l.lock().expect("unable to aquire proof lock!").component,
+            Some(l) => l.component,
             None => return Err(IntegrityError::MissingExhaustivenessProof(claim.proof)),
         };
         self.insert_claim_unchecked(comp_id, Claim::Composition(claim))
@@ -266,7 +267,7 @@ impl Trace {
         eprintln! {"clauses: {}", self.n_orig_clauses};
         eprintln! {"variables: {}", self.n_vars};
         eprintln! {"components: {}", self.components.len()};
-        eprintln! {"proofs: {} with {} steps in total", self.proofs.len(), self.proofs.values().fold(0, |acc, l| acc + l.lock().expect("unable to lock proof!").len())};
+        eprintln! {"proofs: {} with {} steps in total", self.proofs.len(), self.proofs.values().fold(0, |acc, l| acc + l.len())};
         eprintln! {"claims: {}", self.claims.values().fold(0, |acc, t| acc + t.len())};
     }
 

@@ -67,10 +67,10 @@ impl<'t> Verifier<'t> {
     }
 
     pub fn verify_composition(
-        &mut self,
+        &self,
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let mut proof = self.trace.get_proof(composition.proof).unwrap();
+        let proof = self.trace.get_proof(composition.proof).unwrap();
         let comp = self.trace.get_component(&proof.component).unwrap();
 
         if !proof.is_exhaustive_for(&composition.assm) {
@@ -113,7 +113,7 @@ impl<'t> Verifier<'t> {
     }
 
     fn join_subcomponents_valid(
-        &mut self,
+        &self,
         component: &Component,
         children: &[&Component],
     ) -> Result<(), VerificationError> {
@@ -173,11 +173,11 @@ impl<'t> Verifier<'t> {
             }
         }
 
-        self.valid_join_subcomps.insert(key);
+        //self.valid_join_subcomps.insert(key);
         Ok(())
     }
 
-    pub fn verify_join(&mut self, join: &JoinClaim) -> Result<(), VerificationError> {
+    pub fn verify_join(&self, join: &JoinClaim) -> Result<(), VerificationError> {
         let component = self.trace.get_component(&join.component).unwrap();
         let assm_vars: Vec<_> = vars_iter(join.assm.iter()).collect();
         let children: Vec<_> = join
@@ -220,10 +220,7 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
-    pub fn verify_extension(
-        &mut self,
-        extension: &ExtensionClaim,
-    ) -> Result<(), VerificationError> {
+    pub fn verify_extension(&self, extension: &ExtensionClaim) -> Result<(), VerificationError> {
         let comp = self.trace.get_component(&extension.component).unwrap();
         let subcomp = self.trace.get_component(&extension.subcomponent).unwrap();
 
@@ -264,7 +261,7 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
-    pub fn verify_model_claim(&mut self, mc: &ModelClaim) -> Result<(), VerificationError> {
+    pub fn verify_model_claim(&self, mc: &ModelClaim) -> Result<(), VerificationError> {
         let comp = self.trace.get_component(&mc.component).unwrap();
         let mut mc_vars: Vec<_> = vars_iter(mc.assm.iter()).collect();
         mc_vars.sort_unstable();
@@ -283,7 +280,7 @@ impl<'t> Verifier<'t> {
         Ok(())
     }
 
-    pub fn verify_claim(&mut self, claim: &Claim) -> Result<(), VerificationError> {
+    pub fn verify_claim(&self, claim: &Claim) -> Result<(), VerificationError> {
         match claim {
             Claim::Composition(c) => self.verify_composition(c),
             Claim::Join(c) => self.verify_join(c),

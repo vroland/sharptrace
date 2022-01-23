@@ -85,17 +85,15 @@ impl ProofBody {
             self.steps.push(vec![]);
         }
 
-        let num_vars = formula.iter().map(|l| l.var()).max().unwrap();
+        let num_vars = formula.iter().map(|l| l.var()).max().unwrap() as usize;
         Ok(ExhaustivenessProof {
             index: self.index,
             component: self.component,
-            original_formula_len: formula.len(),
-            num_original_clauses: clause_offsets.len(),
             steps: self.steps,
+            pvars: Vec::from(pvars),
             formula,
             clause_offsets,
-            pvars: Vec::from(pvars),
-            assignment: vec![LitAssignment::Unknown; num_vars as usize + 1],
+            num_vars,
         })
     }
 }
@@ -111,16 +109,10 @@ pub struct ExhaustivenessProof {
     formula: Vec<Lit>,
     clause_offsets: Vec<usize>,
 
-    /// length of the original formula vector,
-    /// before adding steps
-    original_formula_len: usize,
-    num_original_clauses: usize,
-
     /// The proof steps.
     steps: Vec<Vec<Lit>>,
 
-    /// The partial assignment used for BCP
-    assignment: Vec<LitAssignment>,
+    num_vars: usize,
 
     /// The prefix variables.
     pvars: Vec<Var>,
@@ -130,11 +122,13 @@ fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = L
     m.map(|l| -l)
 }
 
-impl ExhaustivenessProof {
-    pub fn get_previx_vars(&self) -> &[Var] {
-        &self.pvars
-    }
+struct RUPContext {
+    formula: Vec<Lit>,
+    assignment: Vec<LitAssignment>,
+    clause_offsets: Vec<usize>,
+}
 
+impl RUPContext {
     fn is_solved(&self, l: Lit) -> bool {
         return self.assignment[l.var() as usize] == LitAssignment::from_lit(l);
     }
@@ -143,9 +137,19 @@ impl ExhaustivenessProof {
         return self.assignment[l.var() as usize] == LitAssignment::Unknown;
     }
 
-    fn unit_propagate(&mut self) -> BcpResult {
+    fn assign(&mut self, l: Lit) {
+        self.assignment[l.var() as usize] = LitAssignment::from_lit(l);
+    }
+}
+
+impl ExhaustivenessProof {
+    pub fn get_previx_vars(&self) -> &[Var] {
+        &self.pvars
+    }
+
+    fn unit_propagate(context: &mut RUPContext) -> BcpResult {
         // the empty formula is always successful
-        if self.formula.is_empty() {
+        if context.formula.is_empty() {
             return BcpResult::Success;
         }
 
@@ -154,8 +158,8 @@ impl ExhaustivenessProof {
             new_unit_discovered = false;
 
             // search for clauses to propagate
-            'clauseloop: for offs in &self.clause_offsets {
-                let clause = &self.formula[*offs..];
+            'clauseloop: for offs in &context.clause_offsets {
+                let clause = &context.formula[*offs..];
                 let clauseiter = clause
                     .iter()
                     .copied()
@@ -163,13 +167,13 @@ impl ExhaustivenessProof {
 
                 let mut newunit = None;
                 for (i, l) in clauseiter.enumerate() {
-                    if self.is_solved(l) {
+                    if context.is_solved(l) {
                         // bring solved literal to the front
-                        self.formula.swap(*offs, offs + i);
+                        context.formula.swap(*offs, offs + i);
                         continue 'clauseloop;
                     }
 
-                    if self.is_unassigned(l) {
+                    if context.is_unassigned(l) {
                         // first unassigned lit we encounter
                         if newunit.is_none() {
                             newunit = Some(l);
@@ -184,7 +188,9 @@ impl ExhaustivenessProof {
                 match newunit {
                     None => return BcpResult::Conflict,
                     Some(l) => {
-                        self.assignment[l.var() as usize] = LitAssignment::from_lit(l);
+                        // is equivalent to context.assign(l),
+                        // mut makes borrowchk happy;
+                        context.assignment[l.var() as usize] = LitAssignment::from_lit(l);
                         new_unit_discovered = true
                     }
                 }
@@ -193,8 +199,8 @@ impl ExhaustivenessProof {
         return BcpResult::Success;
     }
 
-    fn is_rup_inference(&mut self, assm: &[Lit], step: &[Lit]) -> bool {
-        self.assignment.fill(LitAssignment::Unknown);
+    fn is_rup_inference(assm: &[Lit], step: &[Lit], context: &mut RUPContext) -> bool {
+        context.assignment.fill(LitAssignment::Unknown);
 
         // fill assumptions into the assignment
         for l in assm
@@ -202,29 +208,31 @@ impl ExhaustivenessProof {
             .copied()
             .chain(negate_model(step.iter().copied()))
         {
-            self.assignment[l.var() as usize] = LitAssignment::from_lit(l);
+            context.assign(l);
         }
 
-        self.unit_propagate() == BcpResult::Conflict
+        Self::unit_propagate(context) == BcpResult::Conflict
     }
 
-    pub fn is_exhaustive_for(&mut self, assm: &[Lit]) -> bool {
-        // reset to original proof formula
-        self.formula.truncate(self.original_formula_len);
-        self.clause_offsets.truncate(self.num_original_clauses);
+    pub fn is_exhaustive_for(&self, assm: &[Lit]) -> bool {
+        let mut context = RUPContext {
+            formula: self.formula.clone(),
+            clause_offsets: self.clause_offsets.clone(),
+            assignment: vec![LitAssignment::Unknown; self.num_vars as usize + 1],
+        };
 
         let mut valid = true;
         let mut step_idx = 0;
         while step_idx < self.steps.len() {
             let step = self.steps[step_idx].clone();
 
-            if !self.is_rup_inference(&assm, &step) {
+            if !Self::is_rup_inference(&assm, &step, &mut context) {
                 eprintln! {"step failed: {:?} in proof {}", step, self.index};
                 valid = false;
             } else {
-                self.clause_offsets.push(self.formula.len());
-                self.formula.extend(step.iter());
-                self.formula.push(CLAUSE_SEPARATOR);
+                context.clause_offsets.push(context.formula.len());
+                context.formula.extend(step.iter());
+                context.formula.push(CLAUSE_SEPARATOR);
             }
             step_idx += 1;
         }
