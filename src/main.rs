@@ -1,8 +1,23 @@
+use clap::Parser;
 use rayon::prelude::*;
 use sharptrace_check::{HeaderParser, ParseError, VerificationError, Verifier};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about)]
+struct Args {
+    /// Name of the input proof trace, - for stdin
+    #[clap(default_value = "-")]
+    trace: PathBuf,
+
+    /// Number of threads for claim verification, 0 = auto
+    #[clap(short, long, default_value_t = 0)]
+    threads: usize,
+}
 
 #[derive(Debug, Error)]
 pub enum ProofError {
@@ -15,21 +30,40 @@ pub enum ProofError {
 }
 
 fn main() -> Result<(), ProofError> {
-    let parser = HeaderParser::from_file(&PathBuf::from("proof"))?;
+    let args = Args::parse();
 
-    eprint!("parsing...");
+    // set number of threads
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()
+        .expect("could not initialize thread pool!");
+
+    // choose input
+    let stdin = std::io::stdin();
+    let parser = if args.trace == PathBuf::from("-") {
+        eprint!("reading from stdin...");
+        let reader = Box::new(stdin.lock().lines());
+        HeaderParser::from(reader)
+    } else {
+        eprint!("reading from {:?}...", args.trace);
+        let reader = Box::new(BufReader::new(File::open(args.trace)?).lines());
+        HeaderParser::from(reader)
+    }?;
+
     let bp = match parser.read_to_body() {
         Ok(bp) => bp,
         Err((l, e)) => {
-            eprintln! {"error in proof line {}:", l};
-            return Err(e.into());
+            eprintln! {};
+            eprintln! {"error in proof line {}: {}", l, e};
+            std::process::exit(1);
         }
     };
     let trace = match bp.parse_complete() {
         Ok(t) => t,
         Err((l, e)) => {
-            eprintln! {"error in proof line {}:", l};
-            return Err(e.into());
+            eprintln! {};
+            eprintln! {"error in proof line {}: {}", l, e};
+            std::process::exit(2);
         }
     };
     eprintln!("done.");

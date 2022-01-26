@@ -2,13 +2,12 @@ use crate::proofs::ProofBody;
 use crate::*;
 use num_bigint::BigUint;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io;
-use std::io::{BufRead, BufReader, Lines};
 use std::iter::{Enumerate, Iterator};
-use std::path::Path;
 use std::str::FromStr;
 use thiserror::Error;
+
+pub type LineIterator<'l> = dyn Iterator<Item = io::Result<String>> + 'l;
 
 #[derive(Debug, Clone)]
 pub enum TraceLine {
@@ -118,15 +117,14 @@ pub enum ParseError {
     IntegrityError(#[from] IntegrityError),
 }
 
-#[derive(Debug)]
-pub struct LineParser {
-    reader: Enumerate<Lines<BufReader<File>>>,
+pub struct LineParser<'l> {
+    reader: Enumerate<Box<LineIterator<'l>>>,
 }
 
-impl LineParser {
-    pub fn from_file(path: &Path) -> io::Result<Self> {
+impl<'l> LineParser<'l> {
+    pub fn from(reader: Box<LineIterator<'l>>) -> io::Result<Self> {
         Ok(LineParser {
-            reader: BufReader::new(File::open(path)?).lines().enumerate(),
+            reader: reader.enumerate(),
         })
     }
 
@@ -244,7 +242,7 @@ impl LineParser {
     }
 }
 
-impl Iterator for LineParser {
+impl<'l> Iterator for LineParser<'l> {
     type Item = (usize, Result<TraceLine, ParseError>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -308,16 +306,15 @@ fn checked_clauseset(
     }
 }
 
-#[derive(Debug)]
-pub struct BodyParser {
+pub struct BodyParser<'l> {
     trace: Trace,
-    lp: LineParser,
+    lp: LineParser<'l>,
     join_children: HashMap<ComponentIndex, Vec<ComponentIndex>>,
     proof_bodies: HashMap<ProofIndex, ProofBody>,
 }
 
 // FIXME: eventually, this should work in a streaming fashion
-impl BodyParser {
+impl<'l> BodyParser<'l> {
     fn parse_line(&mut self, line: TraceLine, ln: usize) -> Result<(), (usize, IntegrityError)> {
         match line {
             TraceLine::ComponentDef {
@@ -447,19 +444,18 @@ impl BodyParser {
     }
 }
 
-#[derive(Debug)]
-pub struct HeaderParser {
-    lp: LineParser,
+pub struct HeaderParser<'l> {
+    lp: LineParser<'l>,
 }
 
-impl HeaderParser {
-    pub fn from_file(path: &Path) -> io::Result<Self> {
+impl<'l> HeaderParser<'l> {
+    pub fn from(reader: Box<LineIterator<'l>>) -> io::Result<Self> {
         Ok(HeaderParser {
-            lp: LineParser::from_file(path)?,
+            lp: LineParser::from(reader)?,
         })
     }
 
-    pub fn read_to_body(mut self) -> Result<BodyParser, (usize, ParseError)> {
+    pub fn read_to_body(mut self) -> Result<BodyParser<'l>, (usize, ParseError)> {
         let mut problem = match self.lp.next() {
             Some((_ln, Ok(TraceLine::Problem { nvars, nclauses }))) => Trace::new(nvars, nclauses),
             Some((ln, Ok(_))) => return Err((ln, ParseError::InvalidFirstLine())),
