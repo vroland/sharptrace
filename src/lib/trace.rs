@@ -1,6 +1,6 @@
 use crate::proofs::ExhaustivenessProof;
 use crate::utils::vars_iter;
-use crate::{Assumption, ClauseIndex, ComponentIndex, IntegrityError, Lit, ProofIndex, Var};
+use crate::{Assumption, ClauseIndex, ComponentIndex, Index, IntegrityError, Lit, ProofIndex, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
 use std::collections::{BTreeMap, HashMap};
@@ -98,8 +98,8 @@ impl fmt::Display for Claim {
 
 #[derive(Debug)]
 pub struct Trace {
-    pub n_vars: usize,
-    pub n_orig_clauses: usize,
+    pub n_vars: Index,
+    pub n_orig_clauses: Index,
     pub clauses: Vec<Clause>,
     components: HashMap<ComponentIndex, Component>,
     proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
@@ -109,7 +109,7 @@ pub struct Trace {
 impl Trace {
     /// returns true if v is a valid variable of this trace.
     pub fn check_var(&self, v: Var) -> bool {
-        v > 0 && (v as usize) <= self.n_vars
+        v > 0 && (v as Index) <= self.n_vars
     }
 
     /// returns true if l is a valid literal of a variable of this trace.
@@ -117,7 +117,7 @@ impl Trace {
         self.check_var(l.var())
     }
 
-    pub fn new(vars: usize, clauses: usize) -> Self {
+    pub fn new(vars: Index, clauses: Index) -> Self {
         Trace {
             n_vars: vars,
             n_orig_clauses: clauses,
@@ -275,7 +275,10 @@ impl Trace {
         match self
             .components
             .values()
-            .find(|c| c.vars.len() == self.n_vars && c.clauses.len() == self.n_orig_clauses)
+            .find(|c| {
+                c.vars.len() == self.n_vars as usize
+                    && c.clauses.len() == self.n_orig_clauses as usize
+            })
             .and_then(|c| self.find_claim(c.index, &Vec::new()))
         {
             Some(claim) => Ok(claim),

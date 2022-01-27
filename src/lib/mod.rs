@@ -8,29 +8,31 @@ mod trace;
 mod utils;
 mod verify;
 
-pub use parse::{BodyParser, HeaderParser, IntegrityError, ParseError};
+pub use parse::{BodyParser, HeaderParser, Index, IntegrityError, ParseError};
 pub use trace::*;
 pub use verify::{VerificationError, Verifier};
 
-pub type Var = isize;
+// use smaller types to save some space
+pub type Var = u32;
+pub type LitInt = i32;
 
 #[derive(Clone, Copy, Eq)]
-pub struct Lit(isize);
+pub struct Lit(LitInt);
 
 impl Lit {
-    pub const fn from_dimacs(l: isize) -> Self {
+    pub const fn from_dimacs(l: LitInt) -> Self {
         Lit(l)
     }
 
-    pub fn signum(self) -> isize {
+    pub fn signum(self) -> LitInt {
         self.0.signum()
     }
 
     pub fn var(self) -> Var {
-        self.0.abs()
+        self.0.abs() as Var
     }
 
-    pub fn as_int(self) -> isize {
+    pub fn as_int(self) -> LitInt {
         self.0
     }
 }
@@ -64,7 +66,7 @@ impl FromStr for Lit {
     type Err = <usize as FromStr>::Err;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        isize::from_str(s).map(Self::from_dimacs)
+        LitInt::from_str(s).map(Self::from_dimacs)
     }
 }
 
@@ -81,8 +83,8 @@ impl fmt::Debug for Lit {
 }
 
 /// A clause index.
-pub type ClauseIndex = usize;
+pub type ClauseIndex = Index;
 /// A component index.
-pub type ComponentIndex = usize;
-pub type ProofIndex = usize;
+pub type ComponentIndex = Index;
+pub type ProofIndex = Index;
 pub type Assumption = Vec<Lit>;

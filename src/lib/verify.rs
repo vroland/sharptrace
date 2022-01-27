@@ -166,7 +166,7 @@ impl<'t> Verifier<'t> {
             let i_only_vars = difference(&component.vars, &child_i.vars);
 
             for cl in &child_i.clauses {
-                let clause = &self.trace.clauses[*cl];
+                let clause = &self.trace.clauses[*cl as usize];
                 if !vars_disjoint(clause.lits.iter(), &i_only_vars) {
                     return Err(VerificationError::IllegalJoinClause(*cl, child_i.index));
                 }
@@ -236,7 +236,7 @@ impl<'t> Verifier<'t> {
         let restricted_assm: Vec<_> =
             restrict_clause(extension.assm.iter(), &introduced_vars).collect();
         for cl in &subcomp.clauses {
-            if self.trace.clauses[*cl]
+            if self.trace.clauses[*cl as usize]
                 .lits
                 .iter()
                 .any(|l| restricted_assm.contains(l))
@@ -272,7 +272,7 @@ impl<'t> Verifier<'t> {
             if !mc
                 .assm
                 .iter()
-                .any(|l| self.trace.clauses[*cl].lits.contains(l))
+                .any(|l| self.trace.clauses[*cl as usize].lits.contains(l))
             {
                 return Err(VerificationError::AssumptionNotAModel());
             }

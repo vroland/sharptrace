@@ -63,7 +63,7 @@ impl ProofBody {
 
         // restricted component clauses
         for cl in &comp.clauses {
-            let lits = &trace.clauses[*cl].lits;
+            let lits = &trace.clauses[*cl as usize].lits;
             let restricted = restrict_clause(lits.iter(), &comp.vars);
             clause_offsets.push(formula.len());
             formula.extend(restricted);

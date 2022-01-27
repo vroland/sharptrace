@@ -19,6 +19,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 rayon = "1.5"
 clap = { version = "3.0", features = ["derive"] }
+nom = "7.1"
 
-#[profile.release]
-#debug = 1
+[profile.release]
+debug = 1

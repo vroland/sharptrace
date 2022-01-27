@@ -42,11 +42,11 @@ fn main() -> Result<(), ProofError> {
     let stdin = std::io::stdin();
     let parser = if args.trace == PathBuf::from("-") {
         eprint!("reading from stdin...");
-        let reader = Box::new(stdin.lock().lines());
+        let reader: Box<dyn BufRead> = Box::new(stdin.lock());
         HeaderParser::from(reader)
     } else {
         eprint!("reading from {:?}...", args.trace);
-        let reader = Box::new(BufReader::new(File::open(args.trace)?).lines());
+        let reader: Box<dyn BufRead> = Box::new(BufReader::new(File::open(args.trace)?));
         HeaderParser::from(reader)
     }?;
 

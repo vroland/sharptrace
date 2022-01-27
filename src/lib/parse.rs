@@ -1,19 +1,29 @@
 use crate::proofs::ProofBody;
 use crate::*;
+use nom::{
+    branch::alt,
+    bytes::streaming::{tag, take_till, take_while},
+    character::streaming::{multispace0, one_of, space0, space1},
+    combinator::{map, map_res, recognize},
+    multi::many0,
+    sequence::{pair, preceded, tuple},
+    IResult,
+};
 use num_bigint::BigUint;
 use std::collections::HashMap;
 use std::io;
-use std::iter::{Enumerate, Iterator};
+use std::io::BufRead;
+use std::iter::Iterator;
 use std::str::FromStr;
 use thiserror::Error;
 
-pub type LineIterator<'l> = dyn Iterator<Item = io::Result<String>> + 'l;
+pub type Index = u32;
 
 #[derive(Debug, Clone)]
 pub enum TraceLine {
     Problem {
-        nvars: usize,
-        nclauses: usize,
+        nvars: Index,
+        nclauses: Index,
     },
     Clause {
         index: ClauseIndex,
@@ -113,99 +123,337 @@ pub enum ParseError {
     ClausesNotFinished(),
     #[error("the trace header is incomplete")]
     IncompleteTraceHeader(),
-    #[error("a data integrity error")]
+    #[error("Integrity error: {0}")]
     IntegrityError(#[from] IntegrityError),
 }
 
-pub struct LineParser<'l> {
-    reader: Enumerate<Box<LineIterator<'l>>>,
+fn parse_idx(input: &str) -> IResult<&str, Index> {
+    map_res(
+        recognize(pair(one_of("123456789"), many0(one_of("0123456789")))),
+        |out: &str| out.parse::<Index>(),
+    )(input)
 }
 
-impl<'l> LineParser<'l> {
-    pub fn from(reader: Box<LineIterator<'l>>) -> io::Result<Self> {
+fn parse_count(input: &str) -> IResult<&str, BigUint> {
+    map_res(
+        recognize(pair(one_of("123456789"), many0(one_of("0123456789")))),
+        |out: &str| out.parse::<BigUint>(),
+    )(input)
+}
+
+fn parse_lit(input: &str) -> IResult<&str, Lit> {
+    map_res(
+        recognize(tuple((
+            alt((tag("-"), tag(""))),
+            one_of("123456789"),
+            many0(one_of("0123456789")),
+        ))),
+        |out: &str| out.parse::<Lit>(),
+    )(input)
+}
+
+fn parse_idxlist(input: &str) -> IResult<&str, Vec<Index>> {
+    map(nom::multi::separated_list0(tag(" "), parse_idx), |mut l| {
+        l.sort_unstable();
+        l.dedup();
+        l
+    })(input)
+}
+
+fn parse_litlist(input: &str) -> IResult<&str, Vec<Lit>> {
+    map(nom::multi::separated_list0(tag(" "), parse_lit), |mut l| {
+        l.sort_unstable_by(|a, b| a.var().partial_cmp(&b.var()).unwrap());
+        l
+    })(input)
+}
+
+fn lineend(input: &str) -> IResult<&str, ()> {
+    map(
+        tuple((space0, tag("0"), nom::character::streaming::line_ending)),
+        |_| (),
+    )(input)
+}
+
+fn nullsep(input: &str) -> IResult<&str, ()> {
+    map(tuple((space0, tag("0"), space1)), |_| ())(input)
+}
+
+fn linetag(prefix: &'static str) -> impl FnMut(&str) -> IResult<&str, ()> {
+    move |i| map(pair(tag(prefix), space1), |_| ())(i)
+}
+
+pub struct LineParser<R> {
+    reader: R,
+    lineno: usize,
+    current_line: String,
+}
+
+// alt(multispace0,
+fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>> {
+    let problem = map(
+        tuple((
+            linetag("p"),
+            linetag("st"),
+            parse_idx,
+            space1,
+            parse_idx,
+            lineend,
+        )),
+        |(_, _, nvars, _, nclauses, _)| Some(TraceLine::Problem { nvars, nclauses }),
+    );
+
+    let clause = map(
+        tuple((linetag("f"), parse_idx, space1, parse_litlist, lineend)),
+        |(_, index, _, lits, _)| Some(TraceLine::Clause { index, lits }),
+    );
+
+    let proof_def = map(
+        tuple((linetag("xp"), parse_idx, space1, parse_idx, lineend)),
+        |(_, index, _, component, _)| Some(TraceLine::ExhaustivenessDef { index, component }),
+    );
+
+    let proof_step = map(
+        tuple((linetag("xs"), parse_idx, space1, parse_litlist, lineend)),
+        |(_, proof, _, lits, _)| Some(TraceLine::ExhaustivenessStep { proof, lits }),
+    );
+
+    let proof_fin = map(
+        tuple((
+            linetag("xf"),
+            parse_idx,
+            space1,
+            parse_idxlist,
+            nullsep,
+            parse_litlist,
+            lineend,
+        )),
+        |(_, proof, _, vars, _, assm, _)| {
+            Some(TraceLine::ExhaustivenessStatement { proof, vars, assm })
+        },
+    );
+
+    let component = map(
+        tuple((
+            linetag("d"),
+            parse_idx,
+            space1,
+            parse_idxlist,
+            nullsep,
+            parse_idxlist,
+            lineend,
+        )),
+        |(_, index, _, vars, _, clauses, _)| {
+            Some(TraceLine::ComponentDef {
+                index,
+                vars,
+                clauses,
+            })
+        },
+    );
+
+    let model = map(
+        tuple((
+            linetag("m"),
+            parse_idx,
+            space1,
+            tag("1"),
+            space1,
+            parse_litlist,
+            lineend,
+        )),
+        |(_, component, _, _, _, model, _)| Some(TraceLine::ModelClaim { component, model }),
+    );
+
+    let composition = map(
+        tuple((
+            linetag("a"),
+            parse_idx,
+            space1,
+            parse_count,
+            space1,
+            parse_litlist,
+            lineend,
+        )),
+        |(_, proof, _, count, _, assm, _)| Some(TraceLine::CompositionClaim { proof, count, assm }),
+    );
+
+    let join = map(
+        tuple((
+            linetag("j"),
+            parse_idx,
+            space1,
+            parse_count,
+            space1,
+            parse_litlist,
+            lineend,
+        )),
+        |(_, component, _, count, _, assm, _)| {
+            Some(TraceLine::JoinClaim {
+                component,
+                count,
+                assm,
+            })
+        },
+    );
+
+    let extension = map(
+        tuple((
+            linetag("e"),
+            parse_idx,
+            space1,
+            parse_idx,
+            space1,
+            parse_count,
+            space1,
+            parse_litlist,
+            lineend,
+        )),
+        |(_, component, _, subcomponent, _, count, _, assm, _)| {
+            Some(TraceLine::ExtensionClaim {
+                component,
+                subcomponent,
+                count,
+                assm,
+            })
+        },
+    );
+
+    let join_child = map(
+        tuple((linetag("jc"), parse_idx, space1, parse_idx, lineend)),
+        |(_, child, _, component, _)| Some(TraceLine::JoinChild { child, component }),
+    );
+
+    let empty = map(
+        tuple((space0, nom::character::streaming::line_ending)),
+        |_: (&str, &str)| None,
+    );
+
+    let comment = map(
+        tuple((
+            tag("c"),
+            take_till(|c| c == '\n'),
+            nom::character::streaming::line_ending,
+        )),
+        |_: (&str, &str, &str)| None,
+    );
+
+    alt((
+        comment,
+        proof_step,
+        join_child,
+        composition,
+        join,
+        extension,
+        model,
+        component,
+        proof_def,
+        proof_fin,
+        clause,
+        problem,
+        empty,
+    ))(input)
+}
+
+impl<R: BufRead> LineParser<R> {
+    pub fn from(reader: R) -> io::Result<Self> {
         Ok(LineParser {
-            reader: reader.enumerate(),
+            reader,
+            lineno: 0,
+            current_line: String::new(),
         })
     }
 
-    fn parsenum<T: FromStr>(val: &str) -> Result<T, ParseError> {
-        val.parse::<T>().map_err(|_e| ParseError::ConversionError())
-    }
-
-    fn parsevec<T: FromStr + Ord>(val: &[&str]) -> Result<Vec<T>, ParseError> {
-        val.iter()
-            .map(|i| LineParser::parsenum(*i))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|mut v| {
-                v.sort_unstable();
-                v
-            })
-    }
-
-    fn parselits(val: &[&str]) -> Result<Vec<Lit>, ParseError> {
-        val.iter()
-            .map(|i| LineParser::parsenum(*i))
-            .collect::<Result<Vec<Lit>, _>>()
-            .map(|mut v| {
-                v.sort_unstable_by(|a, b| a.var().partial_cmp(&b.var()).unwrap());
-                v
-            })
-    }
-
-    fn parse_line(t: &str, data: &[&str]) -> Result<TraceLine, ParseError> {
+    fn parse_line(&self, t: &str, line: &str) -> Result<TraceLine, ParseError> {
         match t {
-            "p" => match data {
-                ["st", nv, nc, "0"] => Ok(TraceLine::Problem {
-                    nvars: LineParser::parsenum(nv)?,
-                    nclauses: LineParser::parsenum(nc)?,
-                }),
-                _ => Err(ParseError::MalformedLine()),
-            },
-            "f" => match data {
-                [idx, l @ .., "0"] => Ok(TraceLine::Clause {
-                    index: LineParser::parsenum(idx)?,
-                    lits: LineParser::parselits(l)?,
-                }),
-                _ => Err(ParseError::MalformedLine()),
-            },
-            "d" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
-                [[idx, v @ ..], [c @ ..], []] => Ok(TraceLine::ComponentDef {
-                    index: LineParser::parsenum(idx)?,
-                    vars: LineParser::parsevec(v)?,
-                    clauses: LineParser::parsevec(c)?,
-                }),
-                _ => Err(ParseError::MalformedLine()),
-            },
-            "xp" => match data {
+            /*
+            "p" => {
+                let caps = self
+                    .re_problem
+                    .captures(line)
+                    .ok_or(ParseError::MalformedLine())?;
+                Ok(TraceLine::Problem {
+                    nvars: parsenum(caps.name("nv").unwrap().as_str())?,
+                    nclauses: parsenum(caps.name("nc").unwrap().as_str())?,
+                })
+            }
+            "f" => {
+                let caps = self
+                    .re_clause
+                    .captures(line)
+                    .ok_or(ParseError::MalformedLine())?;
+                Ok(TraceLine::Clause {
+                    index: parsenum(caps.name("id").unwrap().as_str())?,
+                    lits: parselits(caps.name("lits").unwrap().as_str())?,
+                })
+            }
+            "xp" => match &self.current_line[..] {
                 [idx, comp, "0"] => Ok(TraceLine::ExhaustivenessDef {
                     index: LineParser::parsenum(idx)?,
                     component: LineParser::parsenum(comp)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "xf" => match &data.split(|v| v == &"0").collect::<Vec<_>>()[..] {
-                [[idx, v @ ..], [a @ ..], []] => Ok(TraceLine::ExhaustivenessStatement {
-                    proof: LineParser::parsenum(idx)?,
-                    vars: LineParser::parsevec(v)?,
-                    assm: LineParser::parselits(a)?,
-                }),
+            "d" => match &self.current_line[..] {
+                [idx, numbers @ .., "0"] => {
+                    let mut params = numbers.split(|s| *s == "0");
+                    let v = match params.next() {
+                        Some(v) => v,
+                        _ => return Err(ParseError::MalformedLine()),
+                    };
+                    let c = match params.next() {
+                        Some(c) => c,
+                        _ => return Err(ParseError::MalformedLine()),
+                    };
+                    if params.next().is_some() {
+                        Err(ParseError::MalformedLine())
+                    } else {
+                        Ok(TraceLine::ComponentDef {
+                            index: LineParser::parsenum(idx)?,
+                            vars: LineParser::parsevec(v)?,
+                            clauses: LineParser::parsevec(c)?,
+                        })
+                    }
+                }
                 _ => Err(ParseError::MalformedLine()),
             },
-            "xs" => match data {
+            "xf" => match &self.current_line[..] {
+                [idx, numbers @ .., "0"] => {
+                    let mut params = numbers.split(|s| *s == "0");
+                    let v = match params.next() {
+                        Some(v) => v,
+                        _ => return Err(ParseError::MalformedLine()),
+                    };
+                    let a = match params.next() {
+                        Some(a) => a,
+                        _ => return Err(ParseError::MalformedLine()),
+                    };
+                    if params.next().is_some() {
+                        Err(ParseError::MalformedLine())
+                    } else {
+                        Ok(TraceLine::ExhaustivenessStatement {
+                            proof: LineParser::parsenum(idx)?,
+                            vars: LineParser::parsevec(v)?,
+                            assm: LineParser::parselits(a)?,
+                        })
+                    }
+                }
+                _ => Err(ParseError::MalformedLine()),
+            },
+            "xs" => match &self.current_line[..] {
                 [idx, l @ .., "0"] => Ok(TraceLine::ExhaustivenessStep {
                     proof: LineParser::parsenum(idx)?,
                     lits: LineParser::parselits(l)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "m" => match data {
+            "m" => match &self.current_line[..] {
                 [comp, "1", a @ .., "0"] => Ok(TraceLine::ModelClaim {
                     component: LineParser::parsenum(comp)?,
                     model: LineParser::parselits(a)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "a" => match data {
+            "a" => match &self.current_line[..] {
                 [proof, count, a @ .., "0"] => Ok(TraceLine::CompositionClaim {
                     proof: LineParser::parsenum(proof)?,
                     count: LineParser::parsenum(count)?,
@@ -213,14 +461,14 @@ impl<'l> LineParser<'l> {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "jc" => match data {
+            "jc" => match &self.current_line[..] {
                 [child, comp, "0"] => Ok(TraceLine::JoinChild {
                     child: LineParser::parsenum(child)?,
                     component: LineParser::parsenum(comp)?,
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "j" => match data {
+            "j" => match &self.current_line[..] {
                 [comp, count, a @ .., "0"] => Ok(TraceLine::JoinClaim {
                     component: LineParser::parsenum(comp)?,
                     count: LineParser::parsenum(count)?,
@@ -228,7 +476,7 @@ impl<'l> LineParser<'l> {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
-            "e" => match data {
+            "e" => match &self.current_line[..] {
                 [comp, subcomp, count, a @ .., "0"] => Ok(TraceLine::ExtensionClaim {
                     component: LineParser::parsenum(comp)?,
                     subcomponent: LineParser::parsenum(subcomp)?,
@@ -237,31 +485,28 @@ impl<'l> LineParser<'l> {
                 }),
                 _ => Err(ParseError::MalformedLine()),
             },
+            */
             _ => Err(ParseError::UnknownLineType(t.into())),
         }
     }
 }
 
-impl<'l> Iterator for LineParser<'l> {
+impl<R: BufRead> Iterator for LineParser<R> {
     type Item = (usize, Result<TraceLine, ParseError>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.reader.next() {
-            Some((ln, Ok(data))) => {
-                let mut line = data.trim().split_whitespace();
-                match line.next() {
-                    // empty line
-                    None => self.next(),
-                    // comment line
-                    Some("c") => self.next(),
-                    Some(t) => {
-                        let data = line.collect::<Vec<_>>();
-                        Some((ln + 1, LineParser::parse_line(t, &data)))
-                    }
-                }
-            }
-            Some((ln, Err(e))) => Some((ln + 1, Err(ParseError::IOError(e)))),
-            None => None,
+        self.lineno += 1;
+        self.current_line.clear();
+        match self.reader.read_line(&mut self.current_line) {
+            Err(e) => return Some((self.lineno, Err(ParseError::IOError(e)))),
+            Ok(0) => return None,
+            _ => (),
+        }
+        self.current_line.push_str("\n");
+        match parse_line(self.current_line.as_str()) {
+            Ok((_, Some(pl))) => Some((self.lineno, Ok(pl))),
+            Ok((_, None)) => self.next(),
+            Err(e) => panic! {"nom error: {:?}", e},
         }
     }
 }
@@ -293,7 +538,8 @@ fn checked_clauseset(
     trace: &Trace,
     vec: Vec<ClauseIndex>,
 ) -> Result<Vec<ClauseIndex>, IntegrityError> {
-    let index_invalid = |c: &ClauseIndex| -> bool { !(*c > 0 && *c <= trace.clauses.len()) };
+    let index_invalid =
+        |c: &ClauseIndex| -> bool { !(*c > 0 && *c <= trace.clauses.len().try_into().unwrap()) };
     if vec.iter().any(index_invalid) {
         Err(IntegrityError::InvalidClauseIndex(
             vec.iter().copied().find(index_invalid).unwrap(),
@@ -306,15 +552,15 @@ fn checked_clauseset(
     }
 }
 
-pub struct BodyParser<'l> {
+pub struct BodyParser<R> {
     trace: Trace,
-    lp: LineParser<'l>,
+    lp: LineParser<R>,
     join_children: HashMap<ComponentIndex, Vec<ComponentIndex>>,
     proof_bodies: HashMap<ProofIndex, ProofBody>,
 }
 
 // FIXME: eventually, this should work in a streaming fashion
-impl<'l> BodyParser<'l> {
+impl<R: BufRead> BodyParser<R> {
     fn parse_line(&mut self, line: TraceLine, ln: usize) -> Result<(), (usize, IntegrityError)> {
         match line {
             TraceLine::ComponentDef {
@@ -444,18 +690,18 @@ impl<'l> BodyParser<'l> {
     }
 }
 
-pub struct HeaderParser<'l> {
-    lp: LineParser<'l>,
+pub struct HeaderParser<R> {
+    lp: LineParser<R>,
 }
 
-impl<'l> HeaderParser<'l> {
-    pub fn from(reader: Box<LineIterator<'l>>) -> io::Result<Self> {
+impl<R: BufRead> HeaderParser<R> {
+    pub fn from(reader: R) -> io::Result<Self> {
         Ok(HeaderParser {
             lp: LineParser::from(reader)?,
         })
     }
 
-    pub fn read_to_body(mut self) -> Result<BodyParser<'l>, (usize, ParseError)> {
+    pub fn read_to_body(mut self) -> Result<BodyParser<R>, (usize, ParseError)> {
         let mut problem = match self.lp.next() {
             Some((_ln, Ok(TraceLine::Problem { nvars, nclauses }))) => Trace::new(nvars, nclauses),
             Some((ln, Ok(_))) => return Err((ln, ParseError::InvalidFirstLine())),
@@ -465,7 +711,7 @@ impl<'l> HeaderParser<'l> {
 
         // fill with dummy clause 0
         problem.clauses.resize(
-            problem.n_orig_clauses + 1,
+            (problem.n_orig_clauses + 1).try_into().unwrap(),
             Clause {
                 index: 0,
                 lits: Vec::new(),
@@ -480,7 +726,7 @@ impl<'l> HeaderParser<'l> {
                 Some((ln, Ok(TraceLine::Clause { index, mut lits }))) => {
                     if index < 1
                         || index > problem.n_orig_clauses
-                        || problem.clauses[index].index != 0
+                        || problem.clauses[index as usize].index != 0
                     {
                         return Err((ln, IntegrityError::InvalidClauseIndex(index).into()));
                     }
@@ -488,10 +734,13 @@ impl<'l> HeaderParser<'l> {
                         Ok(l) => l,
                         Err(e) => return Err((ln, ParseError::IntegrityError(e))),
                     };
-                    problem.clauses[index] = Clause { index, lits };
+                    problem.clauses[index as usize] = Clause { index, lits };
                     clauses_read += 1;
                 }
-                Some((ln, Ok(_))) => return Err((ln, ParseError::ClausesNotFinished())),
+                Some((ln, Ok(l))) => {
+                    eprintln! {"too early: {:?}", l};
+                    return Err((ln, ParseError::ClausesNotFinished()));
+                }
                 Some((ln, Err(e))) => return Err((ln, e)),
                 None => return Err((0, ParseError::IncompleteTraceHeader())),
             }
