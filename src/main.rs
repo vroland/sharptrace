@@ -1,11 +1,11 @@
 use clap::Parser;
+use nom::error::convert_error;
 use rayon::prelude::*;
-use sharptrace_check::{HeaderParser, ParseError, VerificationError, Verifier};
+use sharptrace_check::{HeaderParser, TraceReadError, Verifier};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use thiserror::Error;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
@@ -19,17 +19,7 @@ struct Args {
     threads: usize,
 }
 
-#[derive(Debug, Error)]
-pub enum ProofError {
-    #[error("could not open the proof file")]
-    IOError(#[from] std::io::Error),
-    #[error("an error occured when parsing the proof")]
-    ParseError(#[from] ParseError),
-    #[error("an error occured while verifying the proof")]
-    VerificationError(#[from] VerificationError),
-}
-
-fn main() -> Result<(), ProofError> {
+fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     // set number of threads
@@ -39,30 +29,39 @@ fn main() -> Result<(), ProofError> {
         .expect("could not initialize thread pool!");
 
     // choose input
-    let stdin = std::io::stdin();
-    let parser = if args.trace == PathBuf::from("-") {
+    let mut input = String::new();
+    if args.trace == PathBuf::from("-") {
         eprint!("reading from stdin...");
-        let reader: Box<dyn BufRead> = Box::new(stdin.lock());
-        HeaderParser::from(reader)
+        std::io::stdin().lock().read_to_string(&mut input)?;
     } else {
         eprint!("reading from {:?}...", args.trace);
-        let reader: Box<dyn BufRead> = Box::new(BufReader::new(File::open(args.trace)?));
-        HeaderParser::from(reader)
-    }?;
+        BufReader::new(File::open(args.trace)?).read_to_string(&mut input)?;
+    };
+    eprint!("done.\nparsing...");
+
+    let parser = HeaderParser::from(&input);
 
     let bp = match parser.read_to_body() {
-        Ok(bp) => bp,
-        Err((l, e)) => {
-            eprintln! {};
-            eprintln! {"error in proof line {}: {}", l, e};
+        Ok(t) => t,
+        Err(TraceReadError::NomErr(nom::Err::Error(e)))
+        | Err(TraceReadError::NomErr(nom::Err::Failure(e))) => {
+            eprintln! {"error: {}", &convert_error(input.as_str(), e)};
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln! {"error: {}", e};
             std::process::exit(1);
         }
     };
     let trace = match bp.parse_complete() {
         Ok(t) => t,
-        Err((l, e)) => {
-            eprintln! {};
-            eprintln! {"error in proof line {}: {}", l, e};
+        Err(TraceReadError::NomErr(nom::Err::Error(e)))
+        | Err(TraceReadError::NomErr(nom::Err::Failure(e))) => {
+            eprintln! {"error: {}", &convert_error(input.as_str(), e)};
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln! {"error: {}", e};
             std::process::exit(2);
         }
     };
@@ -88,7 +87,10 @@ fn main() -> Result<(), ProofError> {
     });
     eprintln! {"\rclaims verified.          "};
 
-    let root = trace.find_root_claim().map_err(ParseError::from)?;
+    let root = trace
+        .find_root_claim()
+        .map_err(TraceReadError::from)
+        .expect("coult not find root claim!");
     eprintln! {"root model count: {}", root.count()};
     Ok(())
 }

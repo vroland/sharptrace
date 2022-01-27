@@ -8,7 +8,7 @@ mod trace;
 mod utils;
 mod verify;
 
-pub use parse::{BodyParser, HeaderParser, Index, IntegrityError, ParseError};
+pub use parse::{BodyParser, HeaderParser, Index, IntegrityError, TraceReadError};
 pub use trace::*;
 pub use verify::{VerificationError, Verifier};
 
