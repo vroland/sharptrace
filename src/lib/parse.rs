@@ -2,9 +2,9 @@ use crate::proofs::ProofBody;
 use crate::*;
 use nom::{
     branch::alt,
-    bytes::streaming::{tag, take_till, take_while},
-    character::streaming::{one_of, space0, space1},
-    combinator::{complete, eof, map, map_res, recognize},
+    bytes::streaming::{tag, take_till, take_while, take_while1},
+    character::streaming::{space0, space1},
+    combinator::{complete, eof, map, map_res, opt, recognize},
     error::{ParseError, VerboseError},
     sequence::{pair, preceded, terminated, tuple},
     IResult,
@@ -129,10 +129,14 @@ pub enum TraceReadError<'l> {
     NomErr(nom::Err<nom::error::VerboseError<&'l str>>),
 }
 
+fn is_nonzero_digit(c: char) -> bool {
+    c != '0' && c.is_ascii_digit()
+}
+
 fn parse_idx(input: &str) -> IResult<&str, Index, VerboseError<&str>> {
     map_res(
         recognize(pair(
-            one_of("123456789"),
+            take_while1(|c: char| is_nonzero_digit(c)),
             take_while(|c: char| c.is_ascii_digit()),
         )),
         |out: &str| out.parse::<Index>(),
@@ -142,7 +146,7 @@ fn parse_idx(input: &str) -> IResult<&str, Index, VerboseError<&str>> {
 fn parse_count(input: &str) -> IResult<&str, BigUint, VerboseError<&str>> {
     map_res(
         recognize(pair(
-            one_of("123456789"),
+            take_while1(|c: char| is_nonzero_digit(c)),
             take_while(|c: char| c.is_ascii_digit()),
         )),
         |out: &str| out.parse::<BigUint>(),
@@ -152,8 +156,8 @@ fn parse_count(input: &str) -> IResult<&str, BigUint, VerboseError<&str>> {
 fn parse_lit(input: &str) -> IResult<&str, Lit, VerboseError<&str>> {
     map_res(
         recognize(tuple((
-            alt((tag("-"), tag(""))),
-            one_of("123456789"),
+            opt(tag("-")),
+            take_while1(|c: char| is_nonzero_digit(c)),
             take_while(|c: char| c.is_ascii_digit()),
         ))),
         |out: &str| out.parse::<Lit>(),

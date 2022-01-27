@@ -58,8 +58,8 @@ impl ProofBody {
             Some(c) => c,
             None => return Err(IntegrityError::MissingComponentDef(self.component)),
         };
-        let mut formula: Vec<Lit> = vec![];
-        let mut clause_offsets = vec![];
+        let mut formula: Vec<Lit> = Vec::with_capacity(comp.clauses.len() * 2);
+        let mut clause_offsets = Vec::with_capacity(comp.clauses.len());
 
         // restricted component clauses
         for cl in &comp.clauses {
@@ -70,7 +70,7 @@ impl ProofBody {
             formula.push(CLAUSE_SEPARATOR);
         }
 
-        let claims = trace.find_claims(comp.index, Vec::from(pvars)).unwrap();
+        let claims = trace.find_claims(comp.index, pvars).unwrap();
 
         // inverse assumption clauses
         for claim in claims {

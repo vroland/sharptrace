@@ -83,7 +83,7 @@ impl<'t> Verifier<'t> {
         let mut count = BigUint::zero();
         for claim in self
             .trace
-            .find_claims(proof.component, Vec::from(proof.get_previx_vars()))
+            .find_claims(proof.component, &proof.get_previx_vars())
             .unwrap()
             .filter(|claim| is_subset(&composition.assm, claim.assumption()))
         {

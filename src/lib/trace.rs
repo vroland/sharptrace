@@ -195,15 +195,15 @@ impl Trace {
         Ok(())
     }
 
-    pub fn find_claims<'a>(
+    pub fn find_claims<'a, 'b: 'a>(
         &'a self,
         comp: ComponentIndex,
-        assm_vars: Vec<Var>,
+        assm_vars: &'b [Var],
     ) -> Option<impl Iterator<Item = &'a Claim>> {
         self.claims.get(&comp).map(move |c| {
-            c.iter().filter(move |claim| {
+            c.iter().filter(|claim| {
                 claim.assumption().len() == assm_vars.len()
-                    && Vec::from_iter(vars_iter(claim.assumption().iter())) == assm_vars
+                    && vars_iter(claim.assumption().iter()).all(|v| assm_vars.contains(&v))
             })
         })
     }
