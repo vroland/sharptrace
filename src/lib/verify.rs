@@ -1,4 +1,4 @@
-use crate::utils::{restrict_clause, vars_disjoint, vars_iter};
+use crate::utils::{restrict_sorted_clause, vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
@@ -50,12 +50,22 @@ fn is_subset<T: PartialEq>(s1: &[T], s2: &[T]) -> bool {
     s1.iter().all(|v| s2.contains(v))
 }
 
-fn difference<T: PartialEq + Copy>(s1: &[T], s2: &[T]) -> Vec<T> {
-    s1.iter().filter(|v| !s2.contains(v)).copied().collect()
+fn is_sorted_subset(s1: &[Var], s2: &[Var]) -> bool {
+    s1.iter().all(|v| s2.binary_search(v).is_ok())
 }
 
-fn intersection<T: PartialEq + Copy>(s1: &[T], s2: &[T]) -> Vec<T> {
-    s1.iter().filter(|v| s2.contains(v)).copied().collect()
+fn difference<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
+    s1.iter()
+        .filter(|v| !s2.binary_search(v).is_ok())
+        .copied()
+        .collect()
+}
+
+fn intersection<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
+    s1.iter()
+        .filter(|v| s2.binary_search(v).is_ok())
+        .copied()
+        .collect()
 }
 
 impl<'t> Verifier<'t> {
@@ -127,13 +137,13 @@ impl<'t> Verifier<'t> {
 
         if children
             .iter()
-            .any(|c| !is_subset(&c.vars, &component.vars))
+            .any(|c| !is_sorted_subset(&c.vars, &component.vars))
         {
             return Err(VerificationError::ChildVarsInvalid());
         }
         if children
             .iter()
-            .any(|c| !is_subset(&c.clauses, &component.clauses))
+            .any(|c| !is_sorted_subset(&c.clauses, &component.clauses))
         {
             return Err(VerificationError::ChildClausesInvalid());
         }
@@ -189,7 +199,7 @@ impl<'t> Verifier<'t> {
         // check child component validity
         self.join_subcomponents_valid(component, &children)?;
 
-        if !is_subset(&assm_vars, &component.vars) {
+        if !is_sorted_subset(&assm_vars, &component.vars) {
             return Err(VerificationError::InvalidAssumptionVariables());
         }
 
@@ -201,7 +211,7 @@ impl<'t> Verifier<'t> {
                 }
 
                 let intersection_vars = intersection(&child_i.vars, &child_j.vars);
-                if !is_subset(&intersection_vars, &assm_vars) {
+                if !is_sorted_subset(&intersection_vars, &assm_vars) {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
             }
@@ -209,7 +219,9 @@ impl<'t> Verifier<'t> {
 
         let mut count = BigUint::one();
         for child_i in &children {
-            let child_assm = restrict_clause(join.assm.iter(), &child_i.vars).collect();
+            let child_assm = restrict_sorted_clause(join.assm.iter(), &child_i.vars)
+                .copied()
+                .collect();
             count *= self.lookup_subclaim_count(child_i.index, &child_assm)?;
         }
 
@@ -224,17 +236,19 @@ impl<'t> Verifier<'t> {
         let comp = self.trace.get_component(&extension.component).unwrap();
         let subcomp = self.trace.get_component(&extension.subcomponent).unwrap();
 
-        if !is_subset(&subcomp.vars, &comp.vars) {
+        if !is_sorted_subset(&subcomp.vars, &comp.vars) {
             return Err(VerificationError::ChildVarsInvalid());
         }
-        if !is_subset(&subcomp.clauses, &comp.clauses) {
+        if !is_sorted_subset(&subcomp.clauses, &comp.clauses) {
             return Err(VerificationError::ChildClausesInvalid());
         }
 
         // check allowed clauses
         let introduced_vars = difference(&comp.vars, &subcomp.vars);
         let restricted_assm: Vec<_> =
-            restrict_clause(extension.assm.iter(), &introduced_vars).collect();
+            restrict_sorted_clause(extension.assm.iter(), &introduced_vars)
+                .copied()
+                .collect();
         for cl in &subcomp.clauses {
             if self.trace.clauses[*cl as usize]
                 .lits
@@ -248,7 +262,9 @@ impl<'t> Verifier<'t> {
             }
         }
 
-        let child_assm = restrict_clause(extension.assm.iter(), &subcomp.vars).collect();
+        let child_assm = restrict_sorted_clause(extension.assm.iter(), &subcomp.vars)
+            .copied()
+            .collect();
         let count = self.lookup_subclaim_count(subcomp.index, &child_assm)?;
 
         if count != extension.count {

@@ -1,4 +1,4 @@
-use crate::utils::restrict_clause;
+use crate::utils::restrict_sorted_clause;
 use crate::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl ProofBody {
         // restricted component clauses
         for cl in &comp.clauses {
             let lits = &trace.clauses[*cl as usize].lits;
-            let restricted = restrict_clause(lits.iter(), &comp.vars);
+            let restricted = restrict_sorted_clause(lits.iter(), &comp.vars);
             clause_offsets.push(formula.len());
             formula.extend(restricted);
             formula.push(CLAUSE_SEPARATOR);

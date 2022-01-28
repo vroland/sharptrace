@@ -8,15 +8,23 @@ pub fn vars_disjoint<'a>(vars: impl Iterator<Item = &'a Lit> + 'a, other: &[Var]
     !vars_iter(vars).any(|v| other.binary_search(&v).is_ok())
 }
 
-pub fn restrict_clause<'a, 'b: 'a>(
+/// Restrict a *sorted* sequence of literals to a *sorted* sequence of variables
+pub fn restrict_sorted_clause<'a, 'b: 'a>(
     clause: impl Iterator<Item = &'a Lit> + 'a,
     vars: &'b [Var],
-) -> impl Iterator<Item = Lit> + 'a {
-    clause.filter_map(|l| {
-        if vars.binary_search(&l.var()).is_ok() {
-            Some(*l)
-        } else {
-            None
+) -> impl Iterator<Item = &'a Lit> + 'a {
+    let mut vi = vars.iter().peekable();
+    clause.filter(move |l| loop {
+        let v = match vi.peek() {
+            Some(v) => *v,
+            None => return false,
+        };
+        if *v > l.var() {
+            return false;
+        }
+        vi.next();
+        if *v == l.var() {
+            return true;
         }
     })
 }
