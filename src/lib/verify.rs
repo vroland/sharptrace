@@ -56,7 +56,7 @@ fn is_sorted_subset(s1: &[Var], s2: &[Var]) -> bool {
 
 fn difference<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
     s1.iter()
-        .filter(|v| !s2.binary_search(v).is_ok())
+        .filter(|v| s2.binary_search(v).is_err())
         .copied()
         .collect()
 }
@@ -93,7 +93,7 @@ impl<'t> Verifier<'t> {
         let mut count = BigUint::zero();
         for claim in self
             .trace
-            .find_claims(proof.component, &proof.get_previx_vars())
+            .find_claims(proof.component, proof.get_previx_vars())
             .unwrap()
             .filter(|claim| is_subset(&composition.assm, claim.assumption()))
         {
@@ -113,12 +113,14 @@ impl<'t> Verifier<'t> {
     fn lookup_subclaim_count(
         &self,
         component: ComponentIndex,
-        assm: &Assumption,
+        assm: &[Lit],
     ) -> Result<BigUint, VerificationError> {
         if let Some(claim) = self.trace.find_claim(component, assm) {
             Ok(claim.count())
         } else {
-            Err(VerificationError::NoSupportingClaim(Box::new(assm.clone())))
+            Err(VerificationError::NoSupportingClaim(Box::new(
+                assm.to_owned(),
+            )))
         }
     }
 
@@ -221,7 +223,7 @@ impl<'t> Verifier<'t> {
         for child_i in &children {
             let child_assm = restrict_sorted_clause(join.assm.iter(), &child_i.vars)
                 .copied()
-                .collect();
+                .collect::<Vec<_>>();
             count *= self.lookup_subclaim_count(child_i.index, &child_assm)?;
         }
 
@@ -264,7 +266,7 @@ impl<'t> Verifier<'t> {
 
         let child_assm = restrict_sorted_clause(extension.assm.iter(), &subcomp.vars)
             .copied()
-            .collect();
+            .collect::<Vec<_>>();
         let count = self.lookup_subclaim_count(subcomp.index, &child_assm)?;
 
         if count != extension.count {

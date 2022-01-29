@@ -176,13 +176,7 @@ impl Trace {
 
     pub fn has_join_claims(&self, comp: ComponentIndex) -> bool {
         self.get_component_claims(comp)
-            .map(|mut cl| {
-                cl.find(|c| match c {
-                    Claim::Join(_) => true,
-                    _ => false,
-                })
-                .is_some()
-            })
+            .map(|mut cl| cl.any(|c| matches! {c, Claim::Join(_)}))
             .unwrap_or(false)
     }
 
@@ -208,7 +202,7 @@ impl Trace {
         })
     }
 
-    pub fn find_claim(&self, comp: ComponentIndex, assm: &Assumption) -> Option<&Claim> {
+    pub fn find_claim(&self, comp: ComponentIndex, assm: &[Lit]) -> Option<&Claim> {
         self.claims
             .get(&comp)
             .and_then(move |c| c.iter().find(move |claim| claim.assumption() == assm))

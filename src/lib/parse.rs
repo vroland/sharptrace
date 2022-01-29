@@ -138,7 +138,7 @@ fn is_nonzero_digit(c: char) -> bool {
 fn parse_idx(input: &str) -> IResult<&str, Index, VerboseError<&str>> {
     map_res(
         recognize(pair(
-            take_while1(|c: char| is_nonzero_digit(c)),
+            take_while1(is_nonzero_digit),
             take_while(|c: char| c.is_ascii_digit()),
         )),
         |out: &str| out.parse::<Index>(),
@@ -156,7 +156,7 @@ fn parse_lit(input: &str) -> IResult<&str, Lit, VerboseError<&str>> {
     map_res(
         recognize(tuple((
             opt(tag("-")),
-            take_while1(|c: char| is_nonzero_digit(c)),
+            take_while1(is_nonzero_digit),
             take_while(|c: char| c.is_ascii_digit()),
         ))),
         |out: &str| out.parse::<Lit>(),
@@ -304,11 +304,7 @@ fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>, VerboseError<&str
     {
         Ok(r) => r,
         Err(_e) => {
-            let r = alt((end, empty))(input);
-            if !r.is_ok() {
-                eprintln! {"{:?}", input.len()};
-            }
-            return r;
+            return alt((end, empty))(input);
         }
     };
 
@@ -325,12 +321,10 @@ fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>, VerboseError<&str
         "e" => extension(rest),
         "f" => clause(rest),
         "p" => problem(rest),
-        _ => {
-            return Err(nom::Err::Error(nom::error::VerboseError::from_error_kind(
-                input,
-                nom::error::ErrorKind::Tag,
-            )))
-        }
+        _ => Err(nom::Err::Error(nom::error::VerboseError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Tag,
+        ))),
     }
 }
 
@@ -468,10 +462,10 @@ impl<'l> BodyParser<'l> {
                 })?
             }
             TraceLine::JoinChild { child, component } => {
-                if !self.trace.get_component(&child).is_some() {
+                if self.trace.get_component(&child).is_none() {
                     return Err(IntegrityError::MissingComponentDef(child));
                 };
-                if !self.trace.get_component(&component).is_some() {
+                if self.trace.get_component(&component).is_none() {
                     return Err(IntegrityError::MissingComponentDef(component));
                 };
                 if self.trace.has_join_claims(component) {
@@ -523,7 +517,7 @@ impl<'l> BodyParser<'l> {
     pub fn parse_complete(mut self) -> Result<Trace, TraceReadError<'l>> {
         while let Some(line) = self.lp.next() {
             self.parse_line(line?)
-                .map_err(|e| TraceReadError::IntegrityError(e))?;
+                .map_err(TraceReadError::IntegrityError)?;
         }
         Ok(self.trace)
     }

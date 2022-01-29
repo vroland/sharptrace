@@ -16,12 +16,10 @@ enum LitAssignment {
 
 impl LitAssignment {
     pub fn from_lit(lit: Lit) -> LitAssignment {
-        if lit.as_int() == 0 {
-            LitAssignment::Unknown
-        } else if lit.as_int() > 0 {
-            LitAssignment::Pos
-        } else {
-            LitAssignment::Neg
+        match lit.as_int().cmp(&0) {
+            Ordering::Equal => LitAssignment::Unknown,
+            Ordering::Greater => LitAssignment::Pos,
+            Ordering::Less => LitAssignment::Neg,
         }
     }
 }
@@ -81,7 +79,7 @@ impl ProofBody {
         }
 
         // add final empty clause step if necessary
-        if self.steps.last().map(|s| s.len() != 0).unwrap_or(true) {
+        if self.steps.last().map(|s| !s.is_empty()).unwrap_or(true) {
             self.steps.push(vec![]);
         }
 
@@ -130,11 +128,11 @@ struct RUPContext {
 
 impl RUPContext {
     fn is_solved(&self, l: Lit) -> bool {
-        return self.assignment[l.var() as usize] == LitAssignment::from_lit(l);
+        self.assignment[l.var() as usize] == LitAssignment::from_lit(l)
     }
 
     fn is_unassigned(&self, l: Lit) -> bool {
-        return self.assignment[l.var() as usize] == LitAssignment::Unknown;
+        self.assignment[l.var() as usize] == LitAssignment::Unknown
     }
 
     fn assign(&mut self, l: Lit) {
@@ -196,7 +194,7 @@ impl ExhaustivenessProof {
                 }
             }
         }
-        return BcpResult::Success;
+        BcpResult::Success
     }
 
     fn is_rup_inference(assm: &[Lit], step: &[Lit], context: &mut RUPContext) -> bool {
@@ -226,7 +224,7 @@ impl ExhaustivenessProof {
         while step_idx < self.steps.len() {
             let step = self.steps[step_idx].clone();
 
-            if !Self::is_rup_inference(&assm, &step, &mut context) {
+            if !Self::is_rup_inference(assm, &step, &mut context) {
                 eprintln! {"step failed: {:?} in proof {}", step, self.index};
                 valid = false;
             } else {
