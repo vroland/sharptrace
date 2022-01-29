@@ -95,6 +95,8 @@ pub enum IntegrityError {
     MissingExhaustivenessProof(ProofIndex),
     #[error("a claim for component {0} was given before all join children where specified")]
     ClaimBeforeJoinChild(ComponentIndex),
+    #[error("a join claim was given for component {0}, but it has no join children!")]
+    NoJoinChildren(ComponentIndex),
     #[error("the join child {0} is redundant for component {1}")]
     RedundantJoinChild(ComponentIndex, ComponentIndex),
     #[error("a misplaced problem line within the trace")]
@@ -145,10 +147,7 @@ fn parse_idx(input: &str) -> IResult<&str, Index, VerboseError<&str>> {
 
 fn parse_count(input: &str) -> IResult<&str, BigUint, VerboseError<&str>> {
     map_res(
-        recognize(pair(
-            take_while1(|c: char| is_nonzero_digit(c)),
-            take_while(|c: char| c.is_ascii_digit()),
-        )),
+        recognize(take_while(|c: char| c.is_ascii_digit())),
         |out: &str| out.parse::<BigUint>(),
     )(input)
 }
@@ -499,7 +498,7 @@ impl<'l> BodyParser<'l> {
                 child_components: {
                     match self.join_children.get(&component) {
                         Some(l) => l.clone(),
-                        None => return Err(IntegrityError::ClaimBeforeJoinChild(component)),
+                        None => return Err(IntegrityError::NoJoinChildren(component)),
                     }
                 },
             })?,

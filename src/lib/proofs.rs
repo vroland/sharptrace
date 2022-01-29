@@ -85,7 +85,7 @@ impl ProofBody {
             self.steps.push(vec![]);
         }
 
-        let num_vars = formula.iter().map(|l| l.var()).max().unwrap() as usize;
+        let num_vars = formula.iter().map(|l| l.var()).max().unwrap_or(0) as usize;
         Ok(ExhaustivenessProof {
             index: self.index,
             component: self.component,
