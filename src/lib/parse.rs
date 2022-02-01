@@ -473,7 +473,13 @@ impl<'l> BodyParser<'l> {
                 }
 
                 let children = match self.join_children.get_mut(&component) {
-                    Some(l) => l,
+                    Some(l) => {
+                        if l.contains(&child) {
+                            return Err(IntegrityError::RedundantJoinChild(child, component));
+                        } else {
+                            l
+                        }
+                    }
                     None => {
                         self.join_children.insert(component, Vec::new());
                         self.join_children.get_mut(&component).unwrap()
