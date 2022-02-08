@@ -2,7 +2,7 @@ use crate::utils::{is_sorted_subset, is_subset, restrict_sorted_clause, vars_dis
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -56,8 +56,6 @@ fn intersection<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
 
 #[derive(Debug)]
 pub struct Verifier<'t> {
-    // sets of proven component - subcomponent combinations for join
-    valid_join_subcomps: HashSet<(ComponentIndex, Vec<ComponentIndex>)>,
     trace: &'t Trace,
     valid_proofs: HashMap<ProofIndex, AtomicBool>,
 }
@@ -65,7 +63,6 @@ pub struct Verifier<'t> {
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
-            valid_join_subcomps: HashSet::new(),
             valid_proofs: trace
                 .get_proof_indices()
                 .map(|p| (p, AtomicBool::new(false)))
@@ -147,14 +144,6 @@ impl<'t> Verifier<'t> {
         component: &Component,
         children: &[&Component],
     ) -> Result<(), VerificationError> {
-        let key = (
-            component.index,
-            children.iter().map(|comp| comp.index).collect(),
-        );
-        if self.valid_join_subcomps.contains(&key) {
-            return Ok(());
-        }
-
         if children
             .iter()
             .any(|c| !is_sorted_subset(&c.vars, &component.vars))
@@ -203,7 +192,6 @@ impl<'t> Verifier<'t> {
             }
         }
 
-        //self.valid_join_subcomps.insert(key);
         Ok(())
     }
 
