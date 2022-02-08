@@ -434,15 +434,11 @@ impl<'l> BodyParser<'l> {
                     return Err(IntegrityError::MissingExhaustivenessProof(proof));
                 }
             }
-            TraceLine::ExhaustivenessStatement {
-                proof,
-                assm: _,
-                vars,
-            } => {
+            TraceLine::ExhaustivenessStatement { proof, assm, vars } => {
                 if let Some(bdy) = self.proof_bodies.remove(&proof) {
-                    //let assm = checked_litset(&self.trace, assm).map_err(|e| (ln, e))?;
+                    let assm = checked_litset(&self.trace, assm)?;
                     let vars = checked_varset(&self.trace, vars)?;
-                    let proof = bdy.finalize(&vars, &self.trace)?;
+                    let proof = bdy.finalize(&vars, &self.trace, assm)?;
                     self.trace.add_exhaustiveness_proof(proof)?
                 } else {
                     return Err(IntegrityError::MissingExhaustivenessProof(proof));

@@ -1,16 +1,10 @@
-use crate::utils::{restrict_sorted_clause, vars_disjoint, vars_iter};
+use crate::utils::{is_sorted_subset, is_subset, restrict_sorted_clause, vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
-
-#[derive(Debug)]
-pub struct Verifier<'t> {
-    // sets of proven component - subcomponent combinations for join
-    valid_join_subcomps: HashSet<(ComponentIndex, Vec<ComponentIndex>)>,
-    trace: &'t Trace,
-}
 
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
@@ -46,14 +40,6 @@ pub enum VerificationError {
     NoSupportingClaim(Box<Assumption>),
 }
 
-fn is_subset<T: PartialEq>(s1: &[T], s2: &[T]) -> bool {
-    s1.iter().all(|v| s2.contains(v))
-}
-
-fn is_sorted_subset(s1: &[Var], s2: &[Var]) -> bool {
-    s1.iter().all(|v| s2.binary_search(v).is_ok())
-}
-
 fn difference<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
     s1.iter()
         .filter(|v| s2.binary_search(v).is_err())
@@ -68,10 +54,22 @@ fn intersection<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
         .collect()
 }
 
+#[derive(Debug)]
+pub struct Verifier<'t> {
+    // sets of proven component - subcomponent combinations for join
+    valid_join_subcomps: HashSet<(ComponentIndex, Vec<ComponentIndex>)>,
+    trace: &'t Trace,
+    valid_proofs: HashMap<ProofIndex, AtomicBool>,
+}
+
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
         Verifier {
             valid_join_subcomps: HashSet::new(),
+            valid_proofs: trace
+                .get_proof_indices()
+                .map(|p| (p, AtomicBool::new(false)))
+                .collect(),
             trace,
         }
     }
@@ -83,11 +81,31 @@ impl<'t> Verifier<'t> {
         let proof = self.trace.get_proof(composition.proof).unwrap();
         let comp = self.trace.get_component(&proof.component).unwrap();
 
-        if !proof.is_exhaustive_for(&composition.assm) {
-            return Err(VerificationError::InvalidExhaustivenessProof(
+        if !is_subset(&proof.assm, &composition.assm) {
+            return Err(VerificationError::NoApplicableProof(
                 proof.index,
-                comp.index,
+                Box::new(composition.assm.clone()),
             ));
+        }
+
+        // check wether this proof was already verified
+        let already_proven = self
+            .valid_proofs
+            .get(&composition.proof)
+            .unwrap()
+            .load(Ordering::Relaxed);
+
+        if !already_proven {
+            if !proof.is_exhaustive() {
+                return Err(VerificationError::InvalidExhaustivenessProof(
+                    proof.index,
+                    comp.index,
+                ));
+            }
+            self.valid_proofs
+                .get(&composition.proof)
+                .unwrap()
+                .store(true, Ordering::Relaxed);
         }
 
         let mut count = BigUint::zero();

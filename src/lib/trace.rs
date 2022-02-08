@@ -141,6 +141,10 @@ impl Trace {
         self.proofs.get(&proof)
     }
 
+    pub fn get_proof_indices(&self) -> impl Iterator<Item = ProofIndex> + '_ {
+        self.proofs.keys().copied()
+    }
+
     pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
         self.claims.values().map(|t| t.iter()).flatten()
     }

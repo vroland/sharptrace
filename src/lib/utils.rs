@@ -28,3 +28,11 @@ pub fn restrict_sorted_clause<'a, 'b: 'a>(
         }
     })
 }
+
+pub fn is_subset<T: PartialEq>(s1: &[T], s2: &[T]) -> bool {
+    s1.iter().all(|v| s2.contains(v))
+}
+
+pub fn is_sorted_subset(s1: &[Var], s2: &[Var]) -> bool {
+    s1.iter().all(|v| s2.binary_search(v).is_ok())
+}

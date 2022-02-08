@@ -1,4 +1,4 @@
-use crate::utils::restrict_sorted_clause;
+use crate::utils::{is_subset, restrict_sorted_clause};
 use crate::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -51,6 +51,7 @@ impl ProofBody {
         mut self,
         pvars: &[Var],
         trace: &Trace,
+        assm: Assumption,
     ) -> Result<ExhaustivenessProof, IntegrityError> {
         let comp = match trace.get_component(&self.component) {
             Some(c) => c,
@@ -58,6 +59,13 @@ impl ProofBody {
         };
         let mut formula: Vec<Lit> = Vec::with_capacity(comp.clauses.len() * 2);
         let mut clause_offsets = Vec::with_capacity(comp.clauses.len());
+
+        // add assumption to formula
+        for l in &assm {
+            clause_offsets.push(formula.len());
+            formula.extend(vec![l]);
+            formula.push(CLAUSE_SEPARATOR);
+        }
 
         // restricted component clauses
         for cl in &comp.clauses {
@@ -68,7 +76,11 @@ impl ProofBody {
             formula.push(CLAUSE_SEPARATOR);
         }
 
-        let claims = trace.find_claims(comp.index, pvars).unwrap();
+        // find matching claims
+        let claims = trace
+            .find_claims(comp.index, pvars)
+            .unwrap()
+            .filter(|c| is_subset(&assm, c.assumption()));
 
         // inverse assumption clauses
         for claim in claims {
@@ -90,6 +102,7 @@ impl ProofBody {
             steps: self.steps,
             pvars: Vec::from(pvars),
             formula,
+            assm,
             clause_offsets,
             num_vars,
         })
@@ -101,6 +114,7 @@ impl ProofBody {
 pub struct ExhaustivenessProof {
     pub index: ProofIndex,
     pub component: ComponentIndex,
+    pub assm: Assumption,
 
     /// the proof formula as packed clauses
     /// without the proof assumption
@@ -197,22 +211,21 @@ impl ExhaustivenessProof {
         BcpResult::Success
     }
 
-    fn is_rup_inference(assm: &[Lit], step: &[Lit], context: &mut RUPContext) -> bool {
+    fn is_rup_inference(&self, step: &[Lit], context: &mut RUPContext) -> bool {
         context.assignment.fill(LitAssignment::Unknown);
 
         // fill assumptions into the assignment
-        for l in assm
-            .iter()
-            .copied()
-            .chain(negate_model(step.iter().copied()))
-        {
+        for l in &self.assm {
+            context.assign(*l);
+        }
+        for l in negate_model(step.iter().copied()) {
             context.assign(l);
         }
 
         Self::unit_propagate(context) == BcpResult::Conflict
     }
 
-    pub fn is_exhaustive_for(&self, assm: &[Lit]) -> bool {
+    pub fn is_exhaustive(&self) -> bool {
         let mut context = RUPContext {
             formula: self.formula.clone(),
             clause_offsets: self.clause_offsets.clone(),
@@ -224,7 +237,7 @@ impl ExhaustivenessProof {
         while step_idx < self.steps.len() {
             let step = self.steps[step_idx].clone();
 
-            if !Self::is_rup_inference(assm, &step, &mut context) {
+            if !self.is_rup_inference(&step, &mut context) {
                 eprintln! {"step failed: {:?} in proof {}", step, self.index};
                 valid = false;
             } else {
