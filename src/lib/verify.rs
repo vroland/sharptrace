@@ -20,6 +20,10 @@ pub enum VerificationError {
     InsufficientAssumption(),
     #[error("claimed count is {0}, but verified count is {1}")]
     WrongCount(BigUint, BigUint),
+    #[error(
+        "if a join has a single child, the child id must be larger then the join component id"
+    )]
+    SingleJoinMayBeCyclic(ComponentIndex),
     #[error("child component variables are not a subset of parent variables")]
     ChildVarsInvalid(),
     #[error("child component clauses are not a subset of parent clauses")]
@@ -154,6 +158,9 @@ impl<'t> Verifier<'t> {
             .iter()
             .any(|c| !is_sorted_subset(&c.clauses, &component.clauses))
         {
+            for child in children {
+                eprintln! {"{} {:?}", child.index, difference(&child.clauses, &component.clauses)};
+            }
             return Err(VerificationError::ChildClausesInvalid());
         }
 
@@ -223,6 +230,12 @@ impl<'t> Verifier<'t> {
                     return Err(VerificationError::JoinAssumptionInsufficient());
                 }
             }
+        }
+
+        // for a single component, ensure non-cyclic proof
+        // based on id ordering
+        if children.len() == 1 && component.index > children[0].index {
+            return Err(VerificationError::SingleJoinMayBeCyclic(component.index));
         }
 
         let mut count = BigUint::one();
