@@ -16,7 +16,7 @@ pub use verify::{VerificationError, Verifier};
 pub type Var = u32;
 pub type LitInt = i32;
 
-#[derive(Clone, Copy, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Lit(LitInt);
 
 impl Lit {
@@ -41,12 +41,6 @@ impl std::ops::Neg for Lit {
     type Output = Lit;
     fn neg(self) -> Self::Output {
         Lit(-self.0)
-    }
-}
-
-impl PartialEq for Lit {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
     }
 }
 

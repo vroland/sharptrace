@@ -3,36 +3,37 @@ use crate::utils::vars_iter;
 use crate::{Assumption, ClauseIndex, ComponentIndex, Index, IntegrityError, Lit, ProofIndex, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clause {
     pub index: ClauseIndex,
     pub lits: Vec<Lit>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Component {
     pub index: ComponentIndex,
     pub vars: Vec<Var>,
     pub clauses: Vec<ClauseIndex>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelClaim {
     pub component: ComponentIndex,
     pub assm: Assumption,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionClaim {
     pub proof: ProofIndex,
     pub count: BigUint,
     pub assm: Assumption,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinClaim {
     pub component: ComponentIndex,
     pub count: BigUint,
@@ -40,7 +41,7 @@ pub struct JoinClaim {
     pub child_components: Vec<ComponentIndex>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionClaim {
     pub component: ComponentIndex,
     pub subcomponent: ComponentIndex,
@@ -48,7 +49,7 @@ pub struct ExtensionClaim {
     pub assm: Assumption,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq)]
 pub enum Claim {
     Model(ModelClaim),
     Composition(CompositionClaim),
@@ -82,6 +83,32 @@ impl Claim {
             Claim::Extension(claim) => &claim.assm,
         }
     }
+
+    // this is not always the component, but uniquely identifies component
+    fn unique_component_identifier(&self) -> ComponentIndex {
+        match self {
+            Claim::Model(claim) => claim.component,
+            Claim::Composition(claim) => claim.proof,
+            Claim::Join(claim) => claim.component,
+            Claim::Extension(claim) => claim.component,
+        }
+    }
+}
+
+impl Hash for Claim {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.assumption().hash(state);
+        self.unique_component_identifier().hash(state);
+    }
+}
+
+// FIXME: a bit hacky to use eq for this, but this makes
+// it easier to use a built-in hashmap for de-duplication
+impl PartialEq for Claim {
+    fn eq(&self, other: &Self) -> bool {
+        self.unique_component_identifier() == other.unique_component_identifier()
+            && self.assumption() == other.assumption()
+    }
 }
 
 impl fmt::Display for Claim {
@@ -103,7 +130,7 @@ pub struct Trace {
     pub clauses: Vec<Clause>,
     components: HashMap<ComponentIndex, Component>,
     proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
-    claims: BTreeMap<ComponentIndex, Vec<Claim>>,
+    claims: BTreeMap<ComponentIndex, HashSet<Claim>>,
 }
 
 impl Trace {
@@ -189,7 +216,7 @@ impl Trace {
         if self.components.insert(index, comp).is_some() {
             return Err(IntegrityError::DuplicateComponentId(index));
         }
-        self.claims.insert(index, vec![]);
+        self.claims.insert(index, HashSet::new());
         Ok(())
     }
 
@@ -198,18 +225,22 @@ impl Trace {
         comp: ComponentIndex,
         assm_vars: &'b [Var],
     ) -> Option<impl Iterator<Item = &'a Claim>> {
-        self.claims.get(&comp).map(move |c| {
-            c.iter().filter(|claim| {
-                claim.assumption().len() == assm_vars.len()
-                    && vars_iter(claim.assumption().iter()).all(|v| assm_vars.contains(&v))
+        self.claims.get(&comp).map(|s| {
+            s.iter().filter(|c| {
+                assm_vars.len() == c.assumption().len()
+                    && vars_iter(c.assumption().iter())
+                        .zip(assm_vars.iter())
+                        .all(|(v1, v2)| v1 == *v2)
             })
         })
     }
 
     pub fn find_claim(&self, comp: ComponentIndex, assm: &[Lit]) -> Option<&Claim> {
-        self.claims
-            .get(&comp)
-            .and_then(move |c| c.iter().find(move |claim| claim.assumption() == assm))
+        let dummy = Claim::Model(ModelClaim {
+            assm: assm.to_vec(),
+            component: comp,
+        });
+        self.claims.get(&comp).and_then(|c| c.get(&dummy))
     }
 
     /// check if this component may depend on itself for a join
@@ -224,7 +255,7 @@ impl Trace {
             if jcomp.vars != comp.vars || jcomp.clauses != comp.clauses {
                 continue;
             }
-            for claim in self.claims.get(&c).unwrap() {
+            for claim in self.get_component_claims(c).unwrap() {
                 if let Claim::Join(join) = claim {
                     for child in &join.child_components {
                         if !candidates.contains(child) {
@@ -252,8 +283,11 @@ impl Trace {
         if duplicate {
             return Err(IntegrityError::DuplicateClaim(comp));
         }
+
         assert! {self.claims.contains_key(&comp)};
-        self.claims.get_mut(&comp).unwrap().push(claim);
+
+        let comp_claims = self.claims.get_mut(&comp).unwrap();
+        comp_claims.insert(claim);
         Ok(())
     }
 
