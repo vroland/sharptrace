@@ -20,9 +20,7 @@ pub enum VerificationError {
     InsufficientAssumption(),
     #[error("claimed count is {0}, but verified count is {1}")]
     WrongCount(BigUint, BigUint),
-    #[error(
-        "if a join has a single child, the child id must be larger then the join component id"
-    )]
+    #[error("the single-component join for {0} may lead to a cyclic proof.")]
     SingleJoinMayBeCyclic(ComponentIndex),
     #[error("child component variables are not a subset of parent variables")]
     ChildVarsInvalid(),
@@ -234,7 +232,7 @@ impl<'t> Verifier<'t> {
 
         // for a single component, ensure non-cyclic proof
         // based on id ordering
-        if children.len() == 1 && component.index > children[0].index {
+        if children.len() == 1 && self.trace.is_possibly_cyclic(join) {
             return Err(VerificationError::SingleJoinMayBeCyclic(component.index));
         }
 

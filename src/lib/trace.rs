@@ -212,6 +212,31 @@ impl Trace {
             .and_then(move |c| c.iter().find(move |claim| claim.assumption() == assm))
     }
 
+    /// check if this component may depend on itself for a join
+    pub fn is_possibly_cyclic(&self, jc: &JoinClaim) -> bool {
+        let jcomp = self.get_component(&jc.component).unwrap();
+        let mut candidates = jc.child_components.clone();
+        while let Some(c) = candidates.pop() {
+            if jc.component == c {
+                return true;
+            }
+            let comp = self.get_component(&c).unwrap();
+            if jcomp.vars != comp.vars || jcomp.clauses != comp.clauses {
+                continue;
+            }
+            for claim in self.claims.get(&c).unwrap() {
+                if let Claim::Join(join) = claim {
+                    for child in &join.child_components {
+                        if !candidates.contains(child) {
+                            candidates.push(*child);
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn insert_claim_unchecked(
         &mut self,
         comp: ComponentIndex,
