@@ -74,15 +74,15 @@ fn main() -> std::io::Result<()> {
     let claim_count = trace.get_claims().count();
     let counts_verified = AtomicUsize::new(0);
     trace.get_claims().par_bridge().for_each(|claim| {
-        let old_count = counts_verified.fetch_add(1, Ordering::SeqCst);
-
-        if old_count % (claim_count / 100) == 0 {
-            eprint! {"\rverifying claims... {}%", (old_count * 100) / claim_count};
-        }
         if let Err(e) = verifier.verify_claim(claim) {
             eprintln! {};
             eprintln! {"verification error for {} of component {}: {}", claim, trace.comp_id_of(claim), e}
             std::process::exit(3);
+        }
+        let old_count = counts_verified.fetch_add(1, Ordering::SeqCst);
+
+        if old_count % (claim_count / 100) == 0 {
+            eprint! {"\rverifying claims... {}%", (old_count * 100) / claim_count};
         }
     });
     eprintln! {"\rclaims verified.          "};
@@ -90,15 +90,15 @@ fn main() -> std::io::Result<()> {
     let proof_count = trace.get_claims().count();
     let proofs_verified = AtomicUsize::new(0);
     trace.get_proofs().par_bridge().for_each(|proof| {
-        let old_count = proofs_verified.fetch_add(1, Ordering::SeqCst);
-
-        if old_count % (proof_count / 100) == 0 {
-            eprint! {"\rverifying proofs... {}%", (old_count * 100) / proof_count};
-        }
         if let Err(e) = verifier.verify_proof(proof) {
             eprintln! {};
             eprintln! {"verification error for proof {} of component {}: {}", proof.index, proof.component, e}
             std::process::exit(4);
+        }
+        let old_count = proofs_verified.fetch_add(1, Ordering::SeqCst);
+
+        if old_count % (proof_count / 100) == 0 {
+            eprint! {"\rverifying proofs... {}%", (old_count * 100) / proof_count};
         }
     });
     eprintln! {"\rproofs verified.          "};
