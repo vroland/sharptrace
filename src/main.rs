@@ -76,7 +76,7 @@ fn main() -> std::io::Result<()> {
     trace.get_claims().par_bridge().for_each(|claim| {
         let old_count = counts_verified.fetch_add(1, Ordering::SeqCst);
 
-        if old_count % 100 == 0 {
+        if old_count % (claim_count / 100) == 0 {
             eprint! {"\rverifying claims... {}%", (old_count * 100) / claim_count};
         }
         if let Err(e) = verifier.verify_claim(claim) {
@@ -92,8 +92,8 @@ fn main() -> std::io::Result<()> {
     trace.get_proofs().par_bridge().for_each(|proof| {
         let old_count = proofs_verified.fetch_add(1, Ordering::SeqCst);
 
-        if old_count % 100 == 0 {
-            eprint! {"\rverifying claims... {}%", (old_count * 100) / proof_count};
+        if old_count % (proof_count / 100) == 0 {
+            eprint! {"\rverifying proofs... {}%", (old_count * 100) / proof_count};
         }
         if let Err(e) = verifier.verify_proof(proof) {
             eprintln! {};
