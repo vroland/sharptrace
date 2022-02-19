@@ -3,7 +3,8 @@ use crate::utils::vars_iter;
 use crate::{Assumption, ClauseIndex, ComponentIndex, Index, IntegrityError, Lit, ProofIndex, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -28,6 +29,7 @@ pub struct ModelClaim {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionClaim {
+    pub component: ComponentIndex,
     pub proof: ProofIndex,
     pub count: BigUint,
     pub assm: Assumption,
@@ -84,11 +86,10 @@ impl Claim {
         }
     }
 
-    // this is not always the component, but uniquely identifies component
-    fn unique_component_identifier(&self) -> ComponentIndex {
+    fn component(&self) -> ComponentIndex {
         match self {
             Claim::Model(claim) => claim.component,
-            Claim::Composition(claim) => claim.proof,
+            Claim::Composition(claim) => claim.component,
             Claim::Join(claim) => claim.component,
             Claim::Extension(claim) => claim.component,
         }
@@ -98,7 +99,7 @@ impl Claim {
 impl Hash for Claim {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.assumption().hash(state);
-        self.unique_component_identifier().hash(state);
+        self.component().hash(state);
     }
 }
 
@@ -106,8 +107,19 @@ impl Hash for Claim {
 // it easier to use a built-in hashmap for de-duplication
 impl PartialEq for Claim {
     fn eq(&self, other: &Self) -> bool {
-        self.unique_component_identifier() == other.unique_component_identifier()
-            && self.assumption() == other.assumption()
+        self.component() == other.component() && self.assumption() == other.assumption()
+    }
+}
+
+impl PartialOrd for Claim {
+    fn partial_cmp(&self, other: &Claim) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Claim {
+    fn cmp(&self, other: &Claim) -> Ordering {
+        (self.component(), self.assumption()).cmp(&(other.component(), other.assumption()))
     }
 }
 
@@ -130,7 +142,7 @@ pub struct Trace {
     pub clauses: Vec<Clause>,
     components: HashMap<ComponentIndex, Component>,
     proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
-    claims: BTreeMap<ComponentIndex, HashSet<Claim>>,
+    claims: BTreeMap<ComponentIndex, BTreeSet<Claim>>,
 }
 
 impl Trace {
@@ -216,7 +228,7 @@ impl Trace {
         if self.components.insert(index, comp).is_some() {
             return Err(IntegrityError::DuplicateComponentId(index));
         }
-        self.claims.insert(index, HashSet::new());
+        self.claims.insert(index, BTreeSet::new());
         Ok(())
     }
 
@@ -293,12 +305,13 @@ impl Trace {
 
     pub fn insert_composition_claim(
         &mut self,
-        claim: CompositionClaim,
+        mut claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
         let comp_id = match self.proofs.get(&claim.proof) {
             Some(l) => l.component,
             None => return Err(IntegrityError::MissingExhaustivenessProof(claim.proof)),
         };
+        claim.component = comp_id;
         self.insert_claim_unchecked(comp_id, Claim::Composition(claim))
     }
 

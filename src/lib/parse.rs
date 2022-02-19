@@ -455,6 +455,7 @@ impl<'l> BodyParser<'l> {
                     proof,
                     count,
                     assm: checked_litset(&self.trace, assm)?,
+                    component: 0,
                 })?
             }
             TraceLine::JoinChild { child, component } => {

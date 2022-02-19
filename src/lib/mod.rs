@@ -24,14 +24,17 @@ impl Lit {
         Lit(l)
     }
 
+    #[inline]
     pub fn signum(self) -> LitInt {
         self.0.signum()
     }
 
+    #[inline]
     pub fn var(self) -> Var {
         self.0.abs() as Var
     }
 
+    #[inline]
     pub fn as_int(self) -> LitInt {
         self.0
     }

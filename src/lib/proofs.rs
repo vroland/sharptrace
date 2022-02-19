@@ -14,6 +14,12 @@ enum LitAssignment {
     Neg,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct ClauseInfo {
+    pub offset: usize,
+    pub len: usize,
+}
+
 impl LitAssignment {
     pub fn from_lit(lit: Lit) -> LitAssignment {
         match lit.as_int().cmp(&0) {
@@ -47,6 +53,37 @@ impl ProofBody {
         self.steps.push(step);
     }
 
+    fn greedy_resolve(formula: &mut Vec<Lit>, offsets: &mut Vec<ClauseInfo>) {
+        loop {
+            let n_clauses = offsets.len();
+            if n_clauses < 2 {
+                break;
+            }
+            let current_info = *offsets.last().unwrap();
+            // stop here to avoid special-casing unit clauses or conflicts
+            if current_info.len <= 2 {
+                break;
+            }
+
+            let last_info = &mut offsets[n_clauses - 2];
+            let cur_prefix =
+                &formula[current_info.offset..(current_info.offset + current_info.len - 1)];
+            let cur_lit = formula[current_info.offset + current_info.len - 1];
+            let last_prefix = &formula[last_info.offset..(last_info.offset + last_info.len - 1)];
+            let last_lit = formula[last_info.offset + last_info.len - 1];
+
+            // resolve clauses
+            if cur_prefix == last_prefix && cur_lit == -last_lit {
+                last_info.len -= 1;
+                formula.truncate(last_info.offset + last_info.len + 1);
+                formula.push(CLAUSE_SEPARATOR);
+                offsets.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn finalize(
         mut self,
         pvars: &[Var],
@@ -62,8 +99,11 @@ impl ProofBody {
 
         // add assumption to formula
         for l in &assm {
-            clause_offsets.push(formula.len());
-            formula.extend(vec![l]);
+            clause_offsets.push(ClauseInfo {
+                offset: formula.len(),
+                len: 1,
+            });
+            formula.push(*l);
             formula.push(CLAUSE_SEPARATOR);
         }
 
@@ -71,8 +111,12 @@ impl ProofBody {
         for cl in &comp.clauses {
             let lits = &trace.clauses[*cl as usize].lits;
             let restricted = restrict_sorted_clause(lits.iter(), &comp.vars);
-            clause_offsets.push(formula.len());
+            let offset = formula.len();
             formula.extend(restricted);
+            clause_offsets.push(ClauseInfo {
+                offset,
+                len: formula.len() - offset,
+            });
             formula.push(CLAUSE_SEPARATOR);
         }
 
@@ -85,9 +129,13 @@ impl ProofBody {
         // inverse assumption clauses
         for claim in claims {
             let negated = negate_model(claim.assumption().iter().copied());
-            clause_offsets.push(formula.len());
+            clause_offsets.push(ClauseInfo {
+                offset: formula.len(),
+                len: claim.assumption().len(),
+            });
             formula.extend(negated);
             formula.push(CLAUSE_SEPARATOR);
+            Self::greedy_resolve(&mut formula, &mut clause_offsets);
         }
 
         // add final empty clause step if necessary
@@ -119,7 +167,7 @@ pub struct ExhaustivenessProof {
     /// the proof formula as packed clauses
     /// without the proof assumption
     formula: Vec<Lit>,
-    clause_offsets: Vec<usize>,
+    clause_offsets: Vec<ClauseInfo>,
 
     /// The proof steps.
     steps: Vec<Vec<Lit>>,
@@ -137,19 +185,26 @@ fn negate_model<'a>(m: impl Iterator<Item = Lit> + 'a) -> impl Iterator<Item = L
 struct RUPContext {
     formula: Vec<Lit>,
     assignment: Vec<LitAssignment>,
-    clause_offsets: Vec<usize>,
+    clause_offsets: Vec<ClauseInfo>,
+    assigned_units: usize,
 }
 
 impl RUPContext {
+    #[inline]
     fn is_solved(&self, l: Lit) -> bool {
         self.assignment[l.var() as usize] == LitAssignment::from_lit(l)
     }
 
+    #[inline]
     fn is_unassigned(&self, l: Lit) -> bool {
         self.assignment[l.var() as usize] == LitAssignment::Unknown
     }
 
+    #[inline]
     fn assign(&mut self, l: Lit) {
+        if self.is_unassigned(l) {
+            self.assigned_units += 1;
+        }
         self.assignment[l.var() as usize] = LitAssignment::from_lit(l);
     }
 }
@@ -170,22 +225,24 @@ impl ExhaustivenessProof {
             new_unit_discovered = false;
 
             // search for clauses to propagate
-            'clauseloop: for offs in &context.clause_offsets {
-                let clause = &context.formula[*offs..];
-                let clauseiter = clause
-                    .iter()
-                    .copied()
-                    .take_while(|l| *l != CLAUSE_SEPARATOR);
+            'clauseloop: for info in &context.clause_offsets {
+                if context.assigned_units + 1 < info.len {
+                    continue;
+                }
+
+                let clause = &context.formula[info.offset..(info.offset + info.len)];
 
                 let mut newunit = None;
-                for (i, l) in clauseiter.enumerate() {
-                    if context.is_solved(l) {
+                for (i, l) in clause.iter().enumerate() {
+                    if context.is_solved(*l) {
                         // bring solved literal to the front
-                        context.formula.swap(*offs, offs + i);
+                        if i > 0 {
+                            context.formula.swap(info.offset, info.offset + i);
+                        }
                         continue 'clauseloop;
                     }
 
-                    if context.is_unassigned(l) {
+                    if context.is_unassigned(*l) {
                         // first unassigned lit we encounter
                         if newunit.is_none() {
                             newunit = Some(l);
@@ -202,7 +259,10 @@ impl ExhaustivenessProof {
                     Some(l) => {
                         // is equivalent to context.assign(l),
                         // mut makes borrowchk happy;
-                        context.assignment[l.var() as usize] = LitAssignment::from_lit(l);
+                        if context.is_unassigned(*l) {
+                            context.assignment[l.var() as usize] = LitAssignment::from_lit(*l);
+                            context.assigned_units += 1;
+                        }
                         new_unit_discovered = true
                     }
                 }
@@ -213,6 +273,7 @@ impl ExhaustivenessProof {
 
     fn is_rup_inference(&self, step: &[Lit], context: &mut RUPContext) -> bool {
         context.assignment.fill(LitAssignment::Unknown);
+        context.assigned_units = 0;
 
         // fill assumptions into the assignment
         for l in &self.assm {
@@ -230,10 +291,12 @@ impl ExhaustivenessProof {
             formula: self.formula.clone(),
             clause_offsets: self.clause_offsets.clone(),
             assignment: vec![LitAssignment::Unknown; self.num_vars as usize + 1],
+            assigned_units: 0,
         };
 
         let mut valid = true;
         let mut step_idx = 0;
+        eprintln! {"checking proof {}  with  {} steps and {} clauses.", self.index, self.steps.len(), self.clause_offsets.len()};
         while step_idx < self.steps.len() {
             let step = self.steps[step_idx].clone();
 
@@ -241,7 +304,10 @@ impl ExhaustivenessProof {
                 eprintln! {"step failed: {:?} in proof {}", step, self.index};
                 valid = false;
             } else {
-                context.clause_offsets.push(context.formula.len());
+                context.clause_offsets.push(ClauseInfo {
+                    offset: context.formula.len(),
+                    len: step.len(),
+                });
                 context.formula.extend(step.iter());
                 context.formula.push(CLAUSE_SEPARATOR);
             }
