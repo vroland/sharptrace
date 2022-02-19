@@ -296,7 +296,6 @@ impl ExhaustivenessProof {
 
         let mut valid = true;
         let mut step_idx = 0;
-        eprintln! {"checking proof {}  with  {} steps and {} clauses.", self.index, self.steps.len(), self.clause_offsets.len()};
         while step_idx < self.steps.len() {
             let step = self.steps[step_idx].clone();
 
