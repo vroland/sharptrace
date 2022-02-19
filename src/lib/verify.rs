@@ -1,9 +1,8 @@
+use crate::proofs::ExhaustivenessProof;
 use crate::utils::{is_sorted_subset, is_subset, restrict_sorted_clause, vars_disjoint, vars_iter};
 use crate::*;
 use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -59,18 +58,21 @@ fn intersection<T: PartialEq + Copy + Ord>(s1: &[T], s2: &[T]) -> Vec<T> {
 #[derive(Debug)]
 pub struct Verifier<'t> {
     trace: &'t Trace,
-    valid_proofs: HashMap<ProofIndex, AtomicBool>,
 }
 
 impl<'t> Verifier<'t> {
     pub fn new(trace: &'t Trace) -> Self {
-        Verifier {
-            valid_proofs: trace
-                .get_proof_indices()
-                .map(|p| (p, AtomicBool::new(false)))
-                .collect(),
-            trace,
+        Verifier { trace }
+    }
+
+    pub fn verify_proof(&self, proof: &ExhaustivenessProof) -> Result<(), VerificationError> {
+        if !proof.is_exhaustive() {
+            return Err(VerificationError::InvalidExhaustivenessProof(
+                proof.index,
+                proof.component,
+            ));
         }
+        Ok(())
     }
 
     pub fn verify_composition(
@@ -78,7 +80,6 @@ impl<'t> Verifier<'t> {
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
         let proof = self.trace.get_proof(composition.proof).unwrap();
-        let comp = self.trace.get_component(&proof.component).unwrap();
 
         if !is_subset(&proof.assm, &composition.assm) {
             return Err(VerificationError::NoApplicableProof(
@@ -87,32 +88,13 @@ impl<'t> Verifier<'t> {
             ));
         }
 
-        // check wether this proof was already verified
-        let already_proven = self
-            .valid_proofs
-            .get(&composition.proof)
-            .unwrap()
-            .load(Ordering::Relaxed);
-
-        if !already_proven {
-            if !proof.is_exhaustive() {
-                return Err(VerificationError::InvalidExhaustivenessProof(
-                    proof.index,
-                    comp.index,
-                ));
-            }
-            self.valid_proofs
-                .get(&composition.proof)
-                .unwrap()
-                .store(true, Ordering::Relaxed);
-        }
+        // proofs are checked separately.
 
         let mut count = BigUint::zero();
         for claim in self
             .trace
-            .find_claims(proof.component, proof.get_previx_vars())
+            .find_claims(proof.component, proof.get_previx_vars(), &composition.assm)
             .unwrap()
-            .filter(|claim| is_subset(&composition.assm, claim.assumption()))
         {
             count += claim.count()
         }

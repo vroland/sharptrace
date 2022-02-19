@@ -1,4 +1,4 @@
-use crate::utils::{is_subset, restrict_sorted_clause};
+use crate::utils::restrict_sorted_clause;
 use crate::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -121,10 +121,7 @@ impl ProofBody {
         }
 
         // find matching claims
-        let claims = trace
-            .find_claims(comp.index, pvars)
-            .unwrap()
-            .filter(|c| is_subset(&assm, c.assumption()));
+        let claims = trace.find_claims(comp.index, pvars, &assm).unwrap();
 
         // inverse assumption clauses
         for claim in claims {

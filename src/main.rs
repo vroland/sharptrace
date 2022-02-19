@@ -87,6 +87,22 @@ fn main() -> std::io::Result<()> {
     });
     eprintln! {"\rclaims verified.          "};
 
+    let proof_count = trace.get_claims().count();
+    let proofs_verified = AtomicUsize::new(0);
+    trace.get_proofs().par_bridge().for_each(|proof| {
+        let old_count = proofs_verified.fetch_add(1, Ordering::SeqCst);
+
+        if old_count % 100 == 0 {
+            eprint! {"\rverifying claims... {}%", (old_count * 100) / proof_count};
+        }
+        if let Err(e) = verifier.verify_proof(proof) {
+            eprintln! {};
+            eprintln! {"verification error for proof {} of component {}: {}", proof.index, proof.component, e}
+            std::process::exit(4);
+        }
+    });
+    eprintln! {"\rproofs verified.          "};
+
     let root = trace
         .find_root_claim()
         .map_err(TraceReadError::from)

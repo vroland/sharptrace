@@ -1,5 +1,4 @@
 use crate::proofs::ExhaustivenessProof;
-use crate::utils::vars_iter;
 use crate::{Assumption, ClauseIndex, ComponentIndex, Index, IntegrityError, Lit, ProofIndex, Var};
 use num_bigint::BigUint;
 use num_traits::identities::One;
@@ -180,6 +179,10 @@ impl Trace {
         self.proofs.get(&proof)
     }
 
+    pub fn get_proofs(&self) -> impl Iterator<Item = &ExhaustivenessProof> {
+        self.proofs.values()
+    }
+
     pub fn get_proof_indices(&self) -> impl Iterator<Item = ProofIndex> + '_ {
         self.proofs.keys().copied()
     }
@@ -236,13 +239,40 @@ impl Trace {
         &'a self,
         comp: ComponentIndex,
         assm_vars: &'b [Var],
+        assm: &'b [Lit],
     ) -> Option<impl Iterator<Item = &'a Claim>> {
-        self.claims.get(&comp).map(|s| {
-            s.iter().filter(|c| {
+        let f = |v: &Var, other| {
+            if let Some(l) = assm.iter().find(|l| l.var() == *v) {
+                *l
+            } else {
+                Lit::from_dimacs(other)
+            }
+        };
+        let low_assm = assm_vars
+            .iter()
+            .map(|v| f(v, -(*v as i32)))
+            .collect::<Vec<_>>();
+        let high_assm = assm_vars
+            .iter()
+            .map(|v| f(v, *v as i32))
+            .collect::<Vec<_>>();
+        let norm_assm = assm_vars.iter().map(|v| f(v, 0)).collect::<Vec<_>>();
+        let lowerbound = Claim::Model(ModelClaim {
+            component: comp,
+            assm: low_assm,
+        });
+        let upperbound = Claim::Model(ModelClaim {
+            component: comp,
+            assm: high_assm,
+        });
+        self.claims.get(&comp).map(move |s| {
+            s.range(lowerbound..=upperbound).filter(move |c| {
                 assm_vars.len() == c.assumption().len()
-                    && vars_iter(c.assumption().iter())
+                    && c.assumption()
+                        .iter()
                         .zip(assm_vars.iter())
-                        .all(|(v1, v2)| v1 == *v2)
+                        .zip(norm_assm.iter())
+                        .all(|((l, v), n)| l.var() == *v && (n.var() == 0 || n == l))
             })
         })
     }
