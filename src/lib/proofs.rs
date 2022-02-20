@@ -34,16 +34,14 @@ impl LitAssignment {
 #[derive(Debug, Clone)]
 pub struct ProofBody {
     pub index: ProofIndex,
-    pub component: ComponentIndex,
     steps: Vec<Vec<Lit>>,
 }
 
 const CLAUSE_SEPARATOR: Lit = Lit::from_dimacs(0);
 
 impl ProofBody {
-    pub fn new(index: ProofIndex, component: ComponentIndex) -> Self {
+    pub fn new(index: ProofIndex) -> Self {
         ProofBody {
-            component,
             index,
             steps: vec![],
         }
@@ -89,10 +87,11 @@ impl ProofBody {
         pvars: &[Var],
         trace: &Trace,
         assm: Assumption,
+        component: ComponentIndex,
     ) -> Result<ExhaustivenessProof, IntegrityError> {
-        let comp = match trace.get_component(&self.component) {
+        let comp = match trace.get_component(&component) {
             Some(c) => c,
-            None => return Err(IntegrityError::MissingComponentDef(self.component)),
+            None => return Err(IntegrityError::MissingComponentDef(component)),
         };
         let mut formula: Vec<Lit> = Vec::with_capacity(comp.clauses.len() * 2);
         let mut clause_offsets = Vec::with_capacity(comp.clauses.len());
@@ -143,7 +142,7 @@ impl ProofBody {
         let num_vars = formula.iter().map(|l| l.var()).max().unwrap_or(0) as usize;
         Ok(ExhaustivenessProof {
             index: self.index,
-            component: self.component,
+            component,
             steps: self.steps,
             pvars: Vec::from(pvars),
             formula,

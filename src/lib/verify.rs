@@ -79,7 +79,10 @@ impl<'t> Verifier<'t> {
         &self,
         composition: &CompositionClaim,
     ) -> Result<(), VerificationError> {
-        let proof = self.trace.get_proof(composition.proof).unwrap();
+        let proof = self
+            .trace
+            .get_proof(composition.component, composition.proof)
+            .unwrap();
 
         if !is_subset(&proof.assm, &composition.assm) {
             return Err(VerificationError::NoApplicableProof(

@@ -35,7 +35,6 @@ pub enum TraceLine {
     },
     ExhaustivenessDef {
         index: ProofIndex,
-        component: ComponentIndex,
     },
     ExhaustivenessStep {
         proof: ProofIndex,
@@ -43,6 +42,7 @@ pub enum TraceLine {
     },
     ExhaustivenessStatement {
         proof: ProofIndex,
+        component: ComponentIndex,
         vars: Vec<Var>,
         assm: Vec<Lit>,
     },
@@ -51,6 +51,7 @@ pub enum TraceLine {
         model: Vec<Lit>,
     },
     CompositionClaim {
+        component: ComponentIndex,
         proof: ProofIndex,
         count: BigUint,
         assm: Vec<Lit>,
@@ -87,12 +88,16 @@ pub enum IntegrityError {
     DuplicateComponentId(ComponentIndex),
     #[error("proof id {0} is not unique")]
     DuplicateProofId(ProofIndex),
+    #[error("proof id {0} is not unique (ambiguous) for component {0}")]
+    AmbiguousProofId(ProofIndex, ComponentIndex),
     #[error("a claim with the same assumption already exists for component {0}")]
     DuplicateClaim(ComponentIndex),
     #[error("component {0} this claim references is not (yet) defined")]
     MissingComponentDef(ComponentIndex),
     #[error("the proof {0} this claim references is not (yet) defined")]
     MissingExhaustivenessProof(ProofIndex),
+    #[error("there is no proof {0}  for component {0}")]
+    MissingProofForComp(ProofIndex, ComponentIndex),
     #[error("a claim for component {0} was given before all join children where specified")]
     ClaimBeforeJoinChild(ComponentIndex),
     #[error("a join claim was given for component {0}, but it has no join children!")]
@@ -210,10 +215,9 @@ fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>, VerboseError<&str
         |(index, _, lits, _)| Some(TraceLine::Clause { index, lits }),
     );
 
-    let mut proof_def = map(
-        tuple((parse_idx, space1, parse_idx, lineend)),
-        |(index, _, component, _)| Some(TraceLine::ExhaustivenessDef { index, component }),
-    );
+    let mut proof_def = map(tuple((parse_idx, lineend)), |(index, _)| {
+        Some(TraceLine::ExhaustivenessDef { index })
+    });
 
     let mut proof_step = map(
         tuple((parse_idx, space1, lits, lineend)),
@@ -221,9 +225,16 @@ fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>, VerboseError<&str
     );
 
     let mut proof_fin = map(
-        tuple((parse_idx, space1, idxlist, nullsep, lits, lineend)),
-        |(proof, _, vars, _, assm, _)| {
-            Some(TraceLine::ExhaustivenessStatement { proof, vars, assm })
+        tuple((
+            parse_idx, space1, parse_idx, space1, idxlist, nullsep, lits, lineend,
+        )),
+        |(proof, _, component, _, vars, _, assm, _)| {
+            Some(TraceLine::ExhaustivenessStatement {
+                proof,
+                vars,
+                assm,
+                component,
+            })
         },
     );
 
@@ -244,8 +255,24 @@ fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>, VerboseError<&str
     );
 
     let mut composition = map(
-        tuple((parse_idx, space1, parse_count, space1, lits, lineend)),
-        |(proof, _, count, _, assm, _)| Some(TraceLine::CompositionClaim { proof, count, assm }),
+        tuple((
+            parse_idx,
+            space1,
+            parse_idx,
+            space1,
+            parse_count,
+            space1,
+            lits,
+            lineend,
+        )),
+        |(component, _, proof, _, count, _, assm, _)| {
+            Some(TraceLine::CompositionClaim {
+                component,
+                proof,
+                count,
+                assm,
+            })
+        },
     );
 
     let mut join = map(
@@ -424,11 +451,8 @@ impl<'l> BodyParser<'l> {
                 };
                 self.trace.insert_component(comp)?;
             }
-            TraceLine::ExhaustivenessDef { index, component } => {
-                if let Some(bdy) = self
-                    .proof_bodies
-                    .insert(index, ProofBody::new(index, component))
-                {
+            TraceLine::ExhaustivenessDef { index } => {
+                if let Some(bdy) = self.proof_bodies.insert(index, ProofBody::new(index)) {
                     return Err(IntegrityError::DuplicateProofId(bdy.index));
                 }
             }
@@ -439,11 +463,16 @@ impl<'l> BodyParser<'l> {
                     return Err(IntegrityError::MissingExhaustivenessProof(proof));
                 }
             }
-            TraceLine::ExhaustivenessStatement { proof, assm, vars } => {
-                if let Some(bdy) = self.proof_bodies.remove(&proof) {
+            TraceLine::ExhaustivenessStatement {
+                proof,
+                assm,
+                vars,
+                component,
+            } => {
+                if let Some(bdy) = self.proof_bodies.get(&proof).cloned() {
                     let assm = checked_litset(&self.trace, assm)?;
                     let vars = checked_varset(&self.trace, vars)?;
-                    let proof = bdy.finalize(&vars, &self.trace, assm)?;
+                    let proof = bdy.finalize(&vars, &self.trace, assm, component)?;
                     self.trace.add_exhaustiveness_proof(proof)?
                 } else {
                     return Err(IntegrityError::MissingExhaustivenessProof(proof));
@@ -455,14 +484,17 @@ impl<'l> BodyParser<'l> {
                     assm: checked_litset(&self.trace, model)?,
                 })?
             }
-            TraceLine::CompositionClaim { proof, count, assm } => {
-                self.trace.insert_composition_claim(CompositionClaim {
-                    proof,
-                    count,
-                    assm: checked_litset(&self.trace, assm)?,
-                    component: 0,
-                })?
-            }
+            TraceLine::CompositionClaim {
+                component,
+                proof,
+                count,
+                assm,
+            } => self.trace.insert_composition_claim(CompositionClaim {
+                proof,
+                count,
+                assm: checked_litset(&self.trace, assm)?,
+                component,
+            })?,
             TraceLine::JoinChild { child, component } => {
                 if self.trace.get_component(&child).is_none() {
                     return Err(IntegrityError::MissingComponentDef(child));

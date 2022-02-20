@@ -85,7 +85,7 @@ impl Claim {
         }
     }
 
-    fn component(&self) -> ComponentIndex {
+    pub fn component(&self) -> ComponentIndex {
         match self {
             Claim::Model(claim) => claim.component,
             Claim::Composition(claim) => claim.component,
@@ -140,7 +140,7 @@ pub struct Trace {
     pub n_orig_clauses: Index,
     pub clauses: Vec<Clause>,
     components: HashMap<ComponentIndex, Component>,
-    proofs: BTreeMap<ProofIndex, ExhaustivenessProof>,
+    proofs: BTreeMap<(ComponentIndex, ProofIndex), ExhaustivenessProof>,
     claims: BTreeMap<ComponentIndex, BTreeSet<Claim>>,
 }
 
@@ -166,25 +166,16 @@ impl Trace {
         }
     }
 
-    pub fn comp_id_of(&self, claim: &Claim) -> ComponentIndex {
-        match claim {
-            Claim::Model(c) => c.component,
-            Claim::Extension(c) => c.component,
-            Claim::Join(c) => c.component,
-            Claim::Composition(c) => self.get_proof(c.proof).unwrap().component,
-        }
-    }
-
-    pub fn get_proof(&self, proof: ProofIndex) -> Option<&ExhaustivenessProof> {
-        self.proofs.get(&proof)
+    pub fn get_proof(
+        &self,
+        comp: ComponentIndex,
+        proof: ProofIndex,
+    ) -> Option<&ExhaustivenessProof> {
+        self.proofs.get(&(comp, proof))
     }
 
     pub fn get_proofs(&self) -> impl Iterator<Item = &ExhaustivenessProof> {
         self.proofs.values()
-    }
-
-    pub fn get_proof_indices(&self) -> impl Iterator<Item = ProofIndex> + '_ {
-        self.proofs.keys().copied()
     }
 
     pub fn get_claims(&self) -> impl Iterator<Item = &Claim> {
@@ -210,12 +201,13 @@ impl Trace {
         &mut self,
         proof: ExhaustivenessProof,
     ) -> Result<(), IntegrityError> {
-        if !self.components.contains_key(&proof.component) {
-            return Err(IntegrityError::MissingComponentDef(proof.component));
+        let comp = proof.component;
+        if !self.components.contains_key(&comp) {
+            return Err(IntegrityError::MissingComponentDef(comp));
         }
         let proof_index = proof.index;
-        if self.proofs.insert(proof_index, proof).is_some() {
-            return Err(IntegrityError::DuplicateProofId(proof_index));
+        if self.proofs.insert((comp, proof_index), proof).is_some() {
+            return Err(IntegrityError::AmbiguousProofId(comp, proof_index));
         }
         Ok(())
     }
@@ -335,14 +327,15 @@ impl Trace {
 
     pub fn insert_composition_claim(
         &mut self,
-        mut claim: CompositionClaim,
+        claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
-        let comp_id = match self.proofs.get(&claim.proof) {
-            Some(l) => l.component,
-            None => return Err(IntegrityError::MissingExhaustivenessProof(claim.proof)),
+        if self.proofs.get(&(claim.component, claim.proof)).is_none() {
+            return Err(IntegrityError::MissingProofForComp(
+                claim.proof,
+                claim.component,
+            ));
         };
-        claim.component = comp_id;
-        self.insert_claim_unchecked(comp_id, Claim::Composition(claim))
+        self.insert_claim_unchecked(claim.component, Claim::Composition(claim))
     }
 
     pub fn insert_model_claim(&mut self, claim: ModelClaim) -> Result<(), IntegrityError> {

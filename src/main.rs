@@ -76,7 +76,7 @@ fn main() -> std::io::Result<()> {
     trace.get_claims().par_bridge().for_each(|claim| {
         if let Err(e) = verifier.verify_claim(claim) {
             eprintln! {};
-            eprintln! {"verification error for {} of component {}: {}", claim, trace.comp_id_of(claim), e}
+            eprintln! {"verification error for {} of component {}: {}", claim, claim.component(), e}
             std::process::exit(3);
         }
         let old_count = counts_verified.fetch_add(1, Ordering::SeqCst);
