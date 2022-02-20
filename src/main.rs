@@ -81,7 +81,7 @@ fn main() -> std::io::Result<()> {
         }
         let old_count = counts_verified.fetch_add(1, Ordering::SeqCst);
 
-        if old_count % (claim_count / 100) == 0 {
+        if old_count % (1.max(claim_count / 100)) == 0 {
             eprint! {"\rverifying claims... {}%", (old_count * 100) / claim_count};
         }
     });
@@ -97,7 +97,7 @@ fn main() -> std::io::Result<()> {
         }
         let old_count = proofs_verified.fetch_add(1, Ordering::SeqCst);
 
-        if old_count % (proof_count / 100) == 0 {
+        if old_count % (1.max(proof_count / 100)) == 0 {
             eprint! {"\rverifying proofs... {}%", (old_count * 100) / proof_count};
         }
     });

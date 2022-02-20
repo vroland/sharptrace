@@ -196,8 +196,13 @@ fn linetag(prefix: &'static str) -> impl FnMut(&str) -> IResult<&str, (), Verbos
 // alt(multispace0,
 fn parse_line(input: &str) -> IResult<&str, Option<TraceLine>, VerboseError<&str>> {
     let mut problem = map(
-        tuple((linetag("st"), parse_idx, space1, parse_idx, lineend)),
-        |(_, nvars, _, nclauses, _)| Some(TraceLine::Problem { nvars, nclauses }),
+        tuple((linetag("st"), parse_count, space1, parse_count, lineend)),
+        |(_, nv, _, nc, _)| {
+            Some(TraceLine::Problem {
+                nvars: nv.try_into().unwrap(),
+                nclauses: nc.try_into().unwrap(),
+            })
+        },
     );
 
     let mut clause = map(
