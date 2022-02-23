@@ -139,6 +139,8 @@ impl ProofBody {
             self.steps.push(vec![]);
         }
 
+        formula.shrink_to_fit();
+
         let num_vars = formula.iter().map(|l| l.var()).max().unwrap_or(0) as usize;
         Ok(ExhaustivenessProof {
             index: self.index,

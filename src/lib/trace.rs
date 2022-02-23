@@ -218,8 +218,10 @@ impl Trace {
             .unwrap_or(false)
     }
 
-    pub fn insert_component(&mut self, comp: Component) -> Result<(), IntegrityError> {
+    pub fn insert_component(&mut self, mut comp: Component) -> Result<(), IntegrityError> {
         let index = comp.index;
+        comp.vars.shrink_to_fit();
+        comp.clauses.shrink_to_fit();
         if self.components.insert(index, comp).is_some() {
             return Err(IntegrityError::DuplicateComponentId(index));
         }
@@ -327,7 +329,7 @@ impl Trace {
 
     pub fn insert_composition_claim(
         &mut self,
-        claim: CompositionClaim,
+        mut claim: CompositionClaim,
     ) -> Result<(), IntegrityError> {
         if self.proofs.get(&(claim.component, claim.proof)).is_none() {
             return Err(IntegrityError::MissingProofForComp(
@@ -335,18 +337,25 @@ impl Trace {
                 claim.component,
             ));
         };
+        claim.assm.shrink_to_fit();
         self.insert_claim_unchecked(claim.component, Claim::Composition(claim))
     }
 
-    pub fn insert_model_claim(&mut self, claim: ModelClaim) -> Result<(), IntegrityError> {
+    pub fn insert_model_claim(&mut self, mut claim: ModelClaim) -> Result<(), IntegrityError> {
+        claim.assm.shrink_to_fit();
         self.insert_claim_unchecked(claim.component, Claim::Model(claim))
     }
 
-    pub fn insert_join_claim(&mut self, claim: JoinClaim) -> Result<(), IntegrityError> {
+    pub fn insert_join_claim(&mut self, mut claim: JoinClaim) -> Result<(), IntegrityError> {
+        claim.assm.shrink_to_fit();
         self.insert_claim_unchecked(claim.component, Claim::Join(claim))
     }
 
-    pub fn insert_extension_claim(&mut self, claim: ExtensionClaim) -> Result<(), IntegrityError> {
+    pub fn insert_extension_claim(
+        &mut self,
+        mut claim: ExtensionClaim,
+    ) -> Result<(), IntegrityError> {
+        claim.assm.shrink_to_fit();
         if !self.components.contains_key(&claim.component) {
             return Err(IntegrityError::MissingComponentDef(claim.component));
         };
