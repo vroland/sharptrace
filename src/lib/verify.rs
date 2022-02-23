@@ -5,7 +5,7 @@ use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Error, PartialEq)]
 pub enum VerificationError {
     #[error("the exhaustiveness proof {0} is not applicable for the claim with assm {1:?}")]
     NoApplicableProof(ProofIndex, Box<Assumption>),
@@ -221,6 +221,28 @@ impl<'t> Verifier<'t> {
             return Err(VerificationError::SingleJoinMayBeCyclic(component.index));
         }
 
+        let child_results = children
+            .iter()
+            .map(|child_i| {
+                let child_assm = restrict_sorted_clause(join.assm.iter(), &child_i.vars)
+                    .copied()
+                    .collect::<Vec<_>>();
+                self.lookup_subclaim_count(child_i.index, &child_assm)
+            })
+            .collect::<Vec<_>>();
+
+        // claim is unsat, no further claims needed
+        if child_results.iter().any(|r| r == &Ok(BigUint::zero())) {
+            if BigUint::zero() != join.count {
+                return Err(VerificationError::WrongCount(
+                    join.count.clone(),
+                    BigUint::zero(),
+                ));
+            }
+            return Ok(());
+        }
+
+        // check claim counts
         let mut count = BigUint::one();
         for child_i in &children {
             let child_assm = restrict_sorted_clause(join.assm.iter(), &child_i.vars)
