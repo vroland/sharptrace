@@ -22,5 +22,5 @@ clap = { version = "3.0", features = ["derive"] }
 nom = "7.1"
 
 [profile.release]
-debug = 0
-lto = true
+debug = 1
+#lto = true

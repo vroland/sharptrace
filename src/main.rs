@@ -108,5 +108,7 @@ fn main() -> std::io::Result<()> {
         .map_err(TraceReadError::from)
         .expect("coult not find root claim!");
     eprintln! {"root model count: {}", root.count()};
-    Ok(())
+
+    // exit immediately, to avoid deallocation overhead
+    std::process::exit(0);
 }
