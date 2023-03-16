@@ -374,15 +374,29 @@ impl Trace {
     }
 
     pub fn find_root_claim(&self) -> Result<&Claim, IntegrityError> {
-        match self
+        let is_tautology =
+            |clause: &Clause| clause.lits.iter().any(|l| clause.lits.contains(&(-*l)));
+
+        let result = self
             .components
             .values()
             .find(|c| {
-                c.vars.len() == self.n_vars as usize
-                    && c.clauses.len() == self.n_orig_clauses as usize
+                if c.vars.len() != self.n_vars as usize {
+                    return false;
+                }
+
+                // input clauses that the component does not cover.
+                // the first dummy clause is skipped.
+                let mut missing_clauses = self.clauses[1..]
+                    .iter()
+                    .filter(|cl| !c.clauses.contains(&cl.index));
+
+                // if some tautologies are not covered, we ignore them
+                missing_clauses.all(is_tautology)
             })
-            .and_then(|c| self.find_claim(c.index, &Vec::new()))
-        {
+            .and_then(|c| self.find_claim(c.index, &Vec::new()));
+
+        match result {
             Some(claim) => Ok(claim),
             None => Err(IntegrityError::NoRootClaim()),
         }
